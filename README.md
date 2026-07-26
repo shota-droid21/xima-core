@@ -1,6 +1,6 @@
-# xima-agent
+# xima-core
 
-**xima-agent** is the local-first core of the xima ecosystem.  
+**xima-core** is the local-first core of the xima ecosystem.  
 It runs entirely on your machine and provides labeling, dataset preparation,
 and training pipelines via a local API.
 
@@ -9,7 +9,7 @@ The SaaS UI and cloud services are **not included** here.
 
 ---
 
-## What xima-agent is
+## What xima-core is
 
 - A **local ML agent** for image labeling and training
 - Runs on your own machine (CPU / GPU)
@@ -17,7 +17,7 @@ The SaaS UI and cloud services are **not included** here.
 - Uses the **filesystem as the source of truth**
 - Can be used via **API / CLI only** (no UI required)
 
-xima-agent is designed for:
+xima-core is designed for:
 
 - ML engineers
 - individual developers
@@ -26,7 +26,7 @@ xima-agent is designed for:
 
 ---
 
-## What xima-agent is NOT
+## What xima-core is NOT
 
 - ❌ A cloud service
 - ❌ A hosted training platform
@@ -45,7 +45,7 @@ Your images, labels, and models **never leave your machine**.
 └──────┬───────┘
        │ HTTP (localhost)
 ┌──────▼───────┐
-│  xima-agent  │  FastAPI + pipeline scripts
+│  xima-core  │  FastAPI + pipeline scripts
 │              │
 │  - workspace │
 │  - experiment│
@@ -108,8 +108,8 @@ workspaces/
 ### Clone
 
 ```bash
-git clone https://github.com/<your-org>/xima-agent.git
-cd xima-agent
+git clone https://github.com/<your-org>/xima-core.git
+cd xima-core
 ```
 
 ---
@@ -131,11 +131,11 @@ Operation menu:
 - `log`
 - `health`
 
-Runtime settings are persisted in `xima-agent/.launcher-config.env`.
+Runtime settings are persisted in `xima-core/.launcher-config.env`.
 
 - If the config file does not exist, launcher creates it with defaults.
 - `start` / `stop` / `restart` / `log` / `health` read the saved config.
-- `rebuild` does not read the config first; it asks runtime options again, then overwrites `xima-agent/.launcher-config.env` with the new values.
+- `rebuild` does not read the config first; it asks runtime options again, then overwrites `xima-core/.launcher-config.env` with the new values.
 - `stop` uses `docker compose stop` (containers are kept; not removed).
 - `start` uses saved config and starts with `up -d --no-recreate` (keeps existing containers).
 - `restart` does not re-prompt runtime options; it performs stop then start with saved config.
@@ -174,7 +174,7 @@ no binary blobs in the repository, and reproducible (fixed seed).
 
 ### Authentication Mode
 
-`xima-agent` supports two authentication modes controlled by `XIMA_AGENT_AUTH_MODE`:
+`xima-core` supports two authentication modes controlled by `XIMA_AGENT_AUTH_MODE`:
 
 - `open` (default): no authentication. nginx does **not** call `auth_request`.
 - `external`: JWT validation with an external identity provider. nginx uses `auth_request` to call the agent's `/_auth`.
@@ -206,7 +206,7 @@ External mode JWT auth can use Redis whitelist cache (enabled by default):
 For local reproducibility tests with multiple external-auth-mode agents:
 
 ```bash
-docker compose -f docker-compose.saas-test-multi.yml up -d --build
+docker compose -f docker-compose.ext-test-multi.yml up -d --build
 ```
 
 - agent-1: `http://127.0.0.1:27901`
@@ -216,8 +216,8 @@ docker compose -f docker-compose.saas-test-multi.yml up -d --build
 
 Each node has isolated runtime data:
 
-- workspace: `workspaces-saas-test-{1..4}`
-- state: `api/state-saas-test-{1..4}`
+- workspace: `workspaces-ext-test-{1..4}`
+- state: `api/state-ext-test-{1..4}`
 
 ---
 
@@ -298,13 +298,13 @@ curl http://127.0.0.1:27800/health
 
 ## Usage
 
-xima-agent can be used in three ways:
+xima-core can be used in three ways:
 
 1. **HTTP API** (recommended)
 2. **CLI / scripts**
 3. **Custom UI or automation**
 
-The official xima UI (Plus features) communicates with xima-agent
+The official xima UI (Plus features) communicates with xima-core
 via the same local API.
 
 ---
@@ -329,7 +329,7 @@ These tests validate:
 
 ## Core Concepts
 
-Before using xima-agent, it is recommended to understand:
+Before using xima-core, it is recommended to understand:
 
 - Workspace
 - Experiment
@@ -347,7 +347,7 @@ See:
 
 ## GPU Support
 
-xima-agent supports GPU execution.
+xima-core supports GPU execution.
 
 For NVIDIA GPU (Docker profile):
 
@@ -359,8 +359,8 @@ For Apple Silicon (Metal / PyTorch MPS):
 
 - Use Metal profile compose overlay for `redis/nginx`:
   - `docker compose -f docker-compose.yml -f docker-compose.gpu-metal.yml up -d --build`
-- Run API/worker natively from `xima-agent/.venv` (managed by `./scripts/agent-launcher.sh` in `gpu-metal` profile).
-- If `xima-agent/.venv` is missing (or dependencies are missing), launcher auto-creates the venv and installs `api/requirements.base.txt` + `api/requirements.jobs.txt`.
+- Run API/worker natively from `xima-core/.venv` (managed by `./scripts/agent-launcher.sh` in `gpu-metal` profile).
+- If `xima-core/.venv` is missing (or dependencies are missing), launcher auto-creates the venv and installs `api/requirements.base.txt` + `api/requirements.jobs.txt`.
 - Set job `device` to `metal` (or `mps`) for `train_epoch` / `infer_heads`.
 - `auto` now resolves in order: `cuda -> mps -> cpu`.
 
@@ -368,7 +368,7 @@ For Apple Silicon (Metal / PyTorch MPS):
 
 ## Stability & Support
 
-- xima-agent is provided **as-is**
+- xima-core is provided **as-is**
 - The core APIs and pipelines are stable
 - Internal implementation details may change
 - Backward compatibility is best-effort
@@ -381,14 +381,14 @@ For issues and discussions:
 
 ## License
 
-`xima-agent` is licensed under the **Apache License 2.0**. See [`LICENSE`](LICENSE)
+`xima-core` is licensed under the **Apache License 2.0**. See [`LICENSE`](LICENSE)
 for the full terms and [`NOTICE`](NOTICE) for attribution and third-party notices.
 
 ---
 
 ## Relationship to xima
 
-- **xima-agent**: public, free, local core
+- **xima-core**: public, free, local core
 - **xima (SaaS/UI)**: account management, Plus UI features, convenience tooling
 
-xima-agent will always remain usable on its own.
+xima-core will always remain usable on its own.
