@@ -1,0 +1,8 @@
+# Agent のテスト実行に必要な依存。
+# 本体（FastAPI ルート / jobs / auth）のテストは torch / CLIP を必要としないため、
+# 重い ML 依存（requirements.jobs.txt）を入れずにこのファイルだけで pytest を回せる。
+-r requirements.base.txt
+
+pytest>=8.0
+# FastAPI TestClient は httpx を必要とする（starlette.testclient の実行時依存）。
+httpx>=0.27

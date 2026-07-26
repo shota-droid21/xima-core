@@ -1,0 +1,117 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: xima-agent-redis
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    expose:
+      - "6379"
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+      args:
+        INSTALL_JOBS: "1"
+    container_name: xima-agent-api
+    user: "1000:1000"
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - DAC_OVERRIDE
+      - DAC_READ_SEARCH
+    environment:
+      - UVICORN_APP=app.main:app
+      - UVICORN_HOST=0.0.0.0
+      - UVICORN_PORT=27800
+      - UVICORN_WORKERS=${UVICORN_WORKERS:-2}
+      - XIMA_WORKSPACES_ROOT=/data/workspaces
+      - XIMA_AGENT_PORT=27800
+      - XIMA_AGENT_AUTH_MODE=${XIMA_AGENT_AUTH_MODE:-open}
+      - XIMA_AGENT_JWT_AUDIENCE=${XIMA_AGENT_JWT_AUDIENCE:-xima-agent}
+      - XIMA_AGENT_JWT_ISSUER=${XIMA_AGENT_JWT_ISSUER:-xima-saas}
+      - XIMA_JWT_PUBLIC_KEY_PATH=/agent/.keys/jwt_ed25519_public.pem
+      - XIMA_JWT_ALG=EdDSA
+      - XIMA_AGENT_AUTH_WHITELIST_ENABLED=${XIMA_AGENT_AUTH_WHITELIST_ENABLED:-1}
+      - XIMA_AGENT_AUTH_WHITELIST_TTL_SECONDS=${XIMA_AGENT_AUTH_WHITELIST_TTL_SECONDS:-300}
+      - XIMA_AGENT_AUTH_WHITELIST_REDIS_URL=${XIMA_AGENT_AUTH_WHITELIST_REDIS_URL:-redis://redis:6379/1}
+      - XIMA_AGENT_AUTH_WHITELIST_KEY_PREFIX=${XIMA_AGENT_AUTH_WHITELIST_KEY_PREFIX:-xima:auth:whitelist:v1}
+      - XIMA_CELERY_BROKER_URL=${XIMA_CELERY_BROKER_URL:-redis://redis:6379/0}
+      - XIMA_CELERY_QUEUE=${XIMA_CELERY_QUEUE:-xima_jobs}
+    volumes:
+      # Dev: mount only runtime source dirs (avoid including README/Dockerfile in-container).
+      - ./api/app:/agent/app
+      - ./api/pipeline:/agent/pipeline
+      - ./api/scripts:/agent/scripts
+      # Persist config/state on host during dev (equivalent to the previous ./api bind-mount).
+      - ./api/state:/agent/state
+      - ${XIMA_WORKSPACES_HOST_PATH:-./workspaces}:/data/workspaces
+      # JWT public keys (read-only)
+      - ./.keys:/agent/.keys:ro
+    # PyTorch DataLoader (num_workers>0) が /dev/shm を使うため、学習時に bus error が出る場合はここを増やす
+    shm_size: "2gb"
+    expose:
+      - "27800"
+    # NVIDIA GPUを使う場合は `docker-compose.gpu-nvidia.yml` を重ねて起動する:
+    #   docker compose -f docker-compose.yml -f docker-compose.gpu-nvidia.yml up -d --build
+    depends_on:
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:27800/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+      args:
+        INSTALL_JOBS: "1"
+    container_name: xima-agent-worker
+    user: "1000:1000"
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - DAC_OVERRIDE
+      - DAC_READ_SEARCH
+    environment:
+      - XIMA_WORKSPACES_ROOT=/data/workspaces
+      - XIMA_AGENT_PORT=27800
+      - XIMA_CELERY_BROKER_URL=${XIMA_CELERY_BROKER_URL:-redis://redis:6379/0}
+      - XIMA_CELERY_QUEUE=${XIMA_CELERY_QUEUE:-xima_jobs}
+    volumes:
+      - ./api/app:/agent/app
+      - ./api/pipeline:/agent/pipeline
+      - ./api/scripts:/agent/scripts
+      - ./api/state:/agent/state
+      - ${XIMA_WORKSPACES_HOST_PATH:-./workspaces}:/data/workspaces
+      - ./.keys:/agent/.keys:ro
+    shm_size: "2gb"
+    # Optional CPU limit is provided via overlay compose file:
+    #   XIMA_WORKER_CPUS=2 docker compose \
+    #     -f docker-compose.yml -f docker-compose.worker-cpu.yml up -d --build
+    depends_on:
+      redis:
+        condition: service_started
+    command:
+      - sh
+      - -lc
+      - celery -A app.jobs.celery_app.celery_app worker --loglevel=INFO --queues ${XIMA_CELERY_QUEUE:-xima_jobs} --concurrency ${XIMA_CELERY_WORKER_CONCURRENCY:-1}
+    restart: unless-stopped
+
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    container_name: xima-agent-nginx
+    user: "1000:1000"
+    ports:
+      - "${XIMA_AGENT_NGINX_PORT:-27801}:8080"
+    environment:
+      - XIMA_AGENT_AUTH_MODE=${XIMA_AGENT_AUTH_MODE:-open}
+    volumes:
+      - ${XIMA_WORKSPACES_HOST_PATH:-./workspaces}:/data/workspaces:ro
+    restart: unless-stopped

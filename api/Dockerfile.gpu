@@ -1,0 +1,55 @@
+# GPU-enabled variant.
+# - Requests GPUs at runtime via docker-compose.gpu-nvidia.yml
+# - `nvidia-smi` is provided by bind-mounting the host binary (to avoid driver version mismatch).
+#
+# NOTE: Intended for Linux GPU hosts with NVIDIA Container Toolkit.
+
+FROM python:3.11-slim
+
+# --- OS deps for Pillow (JPEG/PNG/WebP) and general builds
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libjpeg62-turbo-dev \
+    zlib1g-dev \
+    libwebp-dev \
+    ca-certificates \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /agent
+
+# --- Install Python deps (split: base + jobs)
+ARG INSTALL_JOBS=0
+
+# Copy requirement files first to maximize Docker layer cache
+COPY requirements.base.txt /tmp/requirements.base.txt
+COPY requirements.jobs.txt /tmp/requirements.jobs.txt
+
+RUN pip install --no-cache-dir -r /tmp/requirements.base.txt && \
+    if [ "$INSTALL_JOBS" = "1" ]; then \
+    pip install --no-cache-dir -r /tmp/requirements.jobs.txt; \
+    fi
+
+COPY app /agent/app
+COPY pipeline /agent/pipeline
+COPY scripts /agent/scripts
+
+# Keep runtime state writable; do not bake host state into the image.
+RUN mkdir -p /agent/state/jobs
+
+# Create a named user/group with uid/gid=1000 for consistent file ownership.
+RUN groupadd -g 1000 xima && useradd -m -u 1000 -g 1000 xima && \
+    chown -R 1000:1000 /agent
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV UVICORN_APP=app.main:app
+ENV UVICORN_HOST=0.0.0.0
+ENV UVICORN_PORT=27800
+
+EXPOSE 27800
+
+USER 1000:1000
+
+CMD ["sh", "-lc", "uvicorn ${UVICORN_APP} --host ${UVICORN_HOST} --port ${UVICORN_PORT}"]

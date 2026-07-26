@@ -1,0 +1,7 @@
+services:
+  worker:
+    # Limit worker container CPU quota.
+    # Example:
+    #   XIMA_WORKER_CPUS=2 docker compose \
+    #     -f docker-compose.yml -f docker-compose.worker-cpu.yml up -d --build
+    cpus: "${XIMA_WORKER_CPUS:?Set XIMA_WORKER_CPUS (e.g. 2 or 1.5)}"

@@ -1,0 +1,16 @@
+xima-agent
+Copyright 2026 Shota Kobayashi
+
+This product is licensed under the Apache License, Version 2.0 (see the
+accompanying LICENSE file).
+
+This product includes third-party components with their own licenses,
+most notably:
+
+- OpenAI CLIP (MIT License) — used for image embeddings.
+- PyTorch / torchvision (BSD-3-Clause) — model runtime.
+- FastAPI, Uvicorn, Pillow, Celery and other dependencies under their
+  respective permissive licenses (see each package's distribution).
+
+The full text of these licenses is available from the corresponding
+upstream projects.

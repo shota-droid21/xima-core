@@ -1,0 +1,9 @@
+tqdm
+requests
+numpy
+torch
+torchaudio
+torchvision
+ftfy
+regex
+git+https://github.com/openai/CLIP.git

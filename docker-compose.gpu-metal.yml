@@ -1,0 +1,24 @@
+services:
+  # Metal profile runs API/worker natively on macOS host.
+  # Keep service definitions but gate them behind a non-default profile
+  # so `docker compose up` does not start these containers.
+  api:
+    profiles: ["container-api"]
+
+  worker:
+    profiles: ["container-worker"]
+
+  redis:
+    ports:
+      - "127.0.0.1:6379:6379"
+
+  nginx:
+    depends_on:
+      redis:
+        condition: service_started
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ${XIMA_WORKSPACES_HOST_PATH:-./workspaces}:/data/workspaces:ro
+      - ./nginx/nginx.metal.conf:/etc/nginx/xima/nginx.conf:ro
+      - ./nginx/nginx.open.metal.conf:/etc/nginx/xima/nginx.open.conf:ro

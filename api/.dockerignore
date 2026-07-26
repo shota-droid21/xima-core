@@ -1,0 +1,24 @@
+# Keep build context small and avoid accidental inclusion
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local env / tooling
+.venv/
+venv/
+.env
+.env.*
+
+# Repo/editor noise
+.git/
+.gitignore
+.vscode/
+.DS_Store
+
+# Runtime state should be a volume, not baked into the image
+state/

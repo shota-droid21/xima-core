@@ -1,0 +1,38 @@
+services:
+  api:
+    user: "1000:1000"
+    build:
+      dockerfile: Dockerfile.gpu
+    deploy:
+      resources:
+        # GPUデバイスの予約設定
+        reservations:
+          devices:
+            # NVIDIAドライバを使用するデバイスの設定
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [all]
+
+  worker:
+    user: "1000:1000"
+    build:
+      dockerfile: Dockerfile.gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [all]
+
+  nginx:
+    user: "1000:1000"
+    build:
+      dockerfile: Dockerfile.gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [all]

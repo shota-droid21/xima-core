@@ -1,0 +1,23 @@
+# core runtime state (generated)
+api/state/**
+api/state-open/**
+api/state-saas-test-*/
+
+# workspace data
+# workspaces はユーザ資産（画像 / labels.json / 学習成果物）であり、絶対にコミットしない。
+# 新しい workspaces ディレクトリを切っても取りこぼさないよう、接頭辞で一括除外する。
+workspaces/
+workspaces-*/
+
+# JWT Private Keys (秘密鍵は絶対にコミットしない)
+.keys/*_private*
+.keys/*.key
+!.keys/*.pub
+!.keys/*_public.pem
+
+# throwaway local compose
+docker-compose.open.yml
+docker-compose.saas-test*
+
+# local launcher config (persisted runtime selections)
+.launcher-config.env
