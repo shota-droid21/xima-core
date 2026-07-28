@@ -4,6 +4,7 @@ import os
 
 AUTH_MODE_OPEN = "open"
 AUTH_MODE_EXTERNAL = "external"
+AUTH_MODE_LOCAL = "local"
 
 
 def resolve_agent_auth_mode() -> str:

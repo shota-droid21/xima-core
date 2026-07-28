@@ -5,8 +5,9 @@ from pathlib import Path
 from fastapi import FastAPI, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from .auth_mode import AUTH_MODE_EXTERNAL, resolve_agent_auth_mode
+from .auth_mode import AUTH_MODE_EXTERNAL, AUTH_MODE_LOCAL, resolve_agent_auth_mode
 from .auth_jwt import require_auth_with_whitelist
+from .local_mode import local_cors_origins, mount_app_static, setup_local_mode
 from .clustering import create_clustering_router
 from .config import ConfigManager
 from .demo import create_demo_router
@@ -21,9 +22,16 @@ from .utils.identity import ensure_identity
 from .workspace import create_workspace_router
 
 app = FastAPI(title="xima-agent", version="0.1.0")
+
+# local モードは CORS を app オリジン限定（既定は同一オリジンのみ）。
+# open / external は従来どおり無制限（既存挙動を保つ）。
+if resolve_agent_auth_mode() == AUTH_MODE_LOCAL:
+    _cors_allow_origins = local_cors_origins()
+else:
+    _cors_allow_origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -43,6 +51,9 @@ app.include_router(create_jobs_router(jobs_manager))
 app.include_router(create_pairing_router(config_manager))
 app.include_router(create_demo_router(config_manager, jobs_manager))
 app.include_router(create_clustering_router(config_manager))
+
+# local モードのハンドシェイク（ミドルウェア + /local/session）。
+setup_local_mode(app, config_manager)
 
 
 @app.get("/health")
@@ -107,3 +118,8 @@ def auth_probe(
         expected_container_runtime_id=identity.container_id,
     )
     return {"ok": True, "mode": AUTH_MODE_EXTERNAL}
+
+
+# ビルド済み app（dist）の同一オリジン配信。全ルート登録後に mount する
+# （"/" catch-all が API/health/_auth を隠さないため）。XIMA_APP_DIST 未設定なら no-op。
+mount_app_static(app)
