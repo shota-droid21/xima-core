@@ -52,13 +52,15 @@ def test_build_command_resolves_embed_images_script(tmp_path: Path) -> None:
 def test_create_embed_images_job_fills_default_args(monkeypatch, tmp_path: Path) -> None:
     calls: list[dict] = []
 
-    def fake_enqueue_job_task(
-        *, job_id: str, command: list[str], workspace: str | None, task_id: str | None = None
-    ):
+    def fake_enqueue(
+        self, *, job_id: str, command: list[str], workspace: str | None, task_id: str = ""
+    ) -> str:
         calls.append({"command": command})
-        return _DummyAsyncResult(task_id or "task-1")
+        return task_id or "task-1"
 
-    monkeypatch.setattr("app.jobs.manager.enqueue_job_task", fake_enqueue_job_task)
+    monkeypatch.setattr(
+        "app.jobs.backends.local.LocalBackend.enqueue", fake_enqueue
+    )
 
     workspace = "ws51aa20"
     experiment = "ex51aa20"

@@ -12,19 +12,19 @@ from typing import Deque, Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Body, HTTPException, Query
-from redis import Redis
 
-from .celery_app import celery_app
+from .backends import JobBackend, build_backend
 from .runner import build_command
 from .schemas import JOB_TYPES, JobCreateRequest, JobDeleteRequest, JobRecord
-from .tasks import enqueue_job_task
 from ..config import ConfigManager
 from ..label_input import ensure_label_file
 from ..utils.short_id import require_experiment_id, require_workspace_id
 
 
 class JobsManager:
-    def __init__(self, config_manager: ConfigManager) -> None:
+    def __init__(
+        self, config_manager: ConfigManager, *, backend: JobBackend | None = None
+    ) -> None:
         self.config_manager = config_manager
         self.jobs_dir = config_manager.jobs_dir
         self.lock = threading.Lock()
@@ -51,6 +51,12 @@ class JobsManager:
         self._reconcile_cache_lock = threading.Lock()
         self._reconcile_cache_until = 0.0
         self._missing_task_first_seen: dict[str, float] = {}
+        self.backend: JobBackend = backend or build_backend(
+            config_manager,
+            inspect_timeout_seconds=self.worker_inspect_timeout_seconds,
+        )
+        # プロセス終了で in-process ジョブは失われるため、起動時に queued / running を
+        # error へ落とす（LocalBackend では実態と一致する。Decision 036）。
         self._mark_interrupted_jobs()
 
     def _job_paths(self, job_id: str) -> Dict[str, Path]:
@@ -122,119 +128,18 @@ class JobsManager:
         return not self._is_active_status(status)
 
     def _broker_queued_task_ids(self) -> set[str] | None:
-        broker_url = os.environ.get("XIMA_CELERY_BROKER_URL", "redis://redis:6379/0")
-        queue_name = os.environ.get("XIMA_CELERY_QUEUE", "xima_jobs")
-
+        """実行待ちの task id 集合。backend が状態を確定できない場合は None。"""
         try:
-            client = Redis.from_url(broker_url, decode_responses=False)
-            raw_messages = client.lrange(queue_name, 0, -1)
+            return self.backend.queued_task_ids()
         except Exception:  # noqa: BLE001
             return None
-
-        task_ids: set[str] = set()
-        uuid_re = re.compile(
-            r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}"
-        )
-
-        for raw in raw_messages:
-            try:
-                text = raw.decode("utf-8", errors="ignore")
-            except Exception:  # noqa: BLE001
-                text = str(raw)
-
-            try:
-                payload = json.loads(text)
-                headers = payload.get("headers")
-                tid = headers.get("id") if isinstance(headers, dict) else None
-                if isinstance(tid, str) and tid.strip():
-                    task_ids.add(tid.strip().lower())
-                    continue
-            except Exception:  # noqa: BLE001
-                pass
-
-            for m in uuid_re.findall(text.lower()):
-                task_ids.add(m)
-
-        return task_ids
 
     def _worker_known_task_ids(self) -> set[str] | None:
+        """ワーカーが把握している task id 集合。確定できない場合は None。"""
         try:
-            inspect = celery_app.control.inspect(timeout=self.worker_inspect_timeout_seconds)
+            return self.backend.active_task_ids()
         except Exception:  # noqa: BLE001
             return None
-        if inspect is None:
-            return None
-
-        try:
-            ping_map = inspect.ping() or {}
-        except Exception:  # noqa: BLE001
-            return None
-        if not isinstance(ping_map, dict) or len(ping_map) == 0:
-            # No responding worker -> unknown state, skip running-stale judgment.
-            return None
-        ping_workers = {str(k).strip() for k in ping_map.keys() if str(k).strip()}
-        if not ping_workers:
-            return None
-
-        known: set[str] = set()
-        saw_any_state = False
-
-        def _collect_from_requests(data: dict | None) -> None:
-            if not isinstance(data, dict):
-                return
-            for _worker, entries in data.items():
-                if not isinstance(entries, list):
-                    continue
-                for e in entries:
-                    if not isinstance(e, dict):
-                        continue
-                    tid = e.get("id")
-                    if isinstance(tid, str) and tid.strip():
-                        known.add(tid.strip().lower())
-
-        def _collect_from_scheduled(data: dict | None) -> None:
-            if not isinstance(data, dict):
-                return
-            for _worker, entries in data.items():
-                if not isinstance(entries, list):
-                    continue
-                for e in entries:
-                    if not isinstance(e, dict):
-                        continue
-                    req = e.get("request")
-                    if not isinstance(req, dict):
-                        continue
-                    tid = req.get("id")
-                    if isinstance(tid, str) and tid.strip():
-                        known.add(tid.strip().lower())
-
-        try:
-            active_data = inspect.active()
-            if isinstance(active_data, dict) and len(active_data) > 0:
-                saw_any_state = True
-                _collect_from_requests(active_data)
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            reserved_data = inspect.reserved()
-            if isinstance(reserved_data, dict) and len(reserved_data) > 0:
-                saw_any_state = True
-                _collect_from_requests(reserved_data)
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            scheduled_data = inspect.scheduled()
-            if isinstance(scheduled_data, dict) and len(scheduled_data) > 0:
-                saw_any_state = True
-                _collect_from_scheduled(scheduled_data)
-        except Exception:  # noqa: BLE001
-            pass
-
-        # If worker replied to ping but task-state APIs all failed, keep state unknown.
-        if not saw_any_state:
-            return None
-
-        return known
 
     def _clear_missing_task(self, task_id: str) -> None:
         if not task_id:
@@ -389,7 +294,7 @@ class JobsManager:
                 payload["exit_code"] = -1
                 payload["error"] = (
                     "queued task was lost before execution "
-                    "(broker queue entry not found; e.g. broker restart)"
+                    "(queue entry not found in job backend)"
                 )
                 progress = payload.get("progress")
                 if not isinstance(progress, dict):
@@ -404,8 +309,9 @@ class JobsManager:
                 payload["progress"] = progress
                 self._append_job_log(
                     str(payload.get("id") or p.stem),
-                    "[queue_lost] broker queue entry was not found after grace period "
-                    "(possible redis/celery restart or message loss)",
+                    f"[queue_lost] queue entry was not found in backend="
+                    f"{getattr(self.backend, 'name', '?')} after grace period "
+                    "(e.g. broker restart or message loss)",
                     ts=now,
                 )
                 try:
@@ -657,7 +563,7 @@ class JobsManager:
                 raise HTTPException(status_code=400, detail=str(exc))
 
             now = time.time()
-            # Pre-assign celery task id before enqueue to avoid a race where
+            # Pre-assign the backend task id before enqueue to avoid a race where
             # worker-side "running" status gets overwritten by a late queued save.
             worker_task_id = str(uuid4())
             job = JobRecord(
@@ -682,17 +588,19 @@ class JobsManager:
             self._save_job(job)
 
         try:
-            task = enqueue_job_task(
-                job_id=job.id,
-                command=job.command,
-                workspace=job.workspace,
-                task_id=job.worker_task_id,
-            )
-            task_id = str(getattr(task, "id", "") or "").strip()
+            task_id = str(
+                self.backend.enqueue(
+                    job_id=job.id,
+                    command=job.command,
+                    workspace=job.workspace,
+                    task_id=str(job.worker_task_id or ""),
+                )
+                or ""
+            ).strip()
             if task_id and task_id != str(job.worker_task_id or "").strip():
                 # In normal flow this should not happen because task_id is pre-assigned.
-                # If broker returned a different id, patch only task id while preserving
-                # whatever status/progress may already be written by worker.
+                # If the backend returned a different id, patch only task id while
+                # preserving whatever status/progress may already be written by worker.
                 latest = self._load_job(job.id)
                 latest.worker_task_id = task_id
                 self._save_job(latest)
@@ -711,7 +619,8 @@ class JobsManager:
             self._save_job(job)
             self._append_job_log(
                 job.id,
-                f"[enqueue_failed] failed to enqueue via celery/redis: {exc}",
+                f"[enqueue_failed] failed to enqueue via backend="
+                f"{getattr(self.backend, 'name', '?')}: {exc}",
                 ts=failed_at,
             )
             raise HTTPException(status_code=503, detail="failed to enqueue job")
@@ -739,11 +648,7 @@ class JobsManager:
         should_terminate = status == "running" or payload.get("started_at") is not None
         if task_id:
             try:
-                celery_app.control.revoke(
-                    task_id,
-                    terminate=should_terminate,
-                    signal="SIGTERM",
-                )
+                self.backend.revoke(task_id, terminate=should_terminate)
                 self._append_job_log(
                     job.id,
                     f"[cancel] revoke sent (task_id={task_id}, terminate={should_terminate})",

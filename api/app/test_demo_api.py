@@ -13,15 +13,10 @@ from app.demo import create_demo_router
 from app.jobs.manager import JobsManager
 
 
-class _DummyAsyncResult:
-    def __init__(self, task_id: str) -> None:
-        self.id = task_id
-
-
 def _make_client(tmp_path: Path, monkeypatch) -> TestClient:
     monkeypatch.setattr(
-        "app.jobs.manager.enqueue_job_task",
-        lambda **kwargs: _DummyAsyncResult("task-demo"),
+        "app.jobs.backends.local.LocalBackend.enqueue",
+        lambda self, **kwargs: "task-demo",
     )
     # ここでは worker を動かさないため、取り込み待ちはスタブ化する
     # （待ち処理そのものは _wait_for_import の単体テストで検証する）。

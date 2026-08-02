@@ -28,15 +28,17 @@ def _make_client(tmp_path: Path) -> TestClient:
 def test_jobs_can_be_queued_multiple_times(monkeypatch, tmp_path: Path) -> None:
     calls: list[dict] = []
 
-    def fake_enqueue_job_task(
-        *, job_id: str, command: list[str], workspace: str | None, task_id: str | None = None
-    ):
+    def fake_enqueue(
+        self, *, job_id: str, command: list[str], workspace: str | None, task_id: str = ""
+    ) -> str:
         calls.append(
             {"job_id": job_id, "command": command, "workspace": workspace, "task_id": task_id}
         )
-        return _DummyAsyncResult(task_id or f"task-{len(calls)}")
+        return task_id or f"task-{len(calls)}"
 
-    monkeypatch.setattr("app.jobs.manager.enqueue_job_task", fake_enqueue_job_task)
+    monkeypatch.setattr(
+        "app.jobs.backends.local.LocalBackend.enqueue", fake_enqueue
+    )
 
     workspace = "ws51aa10"
     experiment = "ex51aa10"
@@ -72,12 +74,14 @@ def test_jobs_can_be_queued_multiple_times(monkeypatch, tmp_path: Path) -> None:
 
 
 def test_create_job_returns_503_when_enqueue_fails(monkeypatch, tmp_path: Path) -> None:
-    def fake_enqueue_job_task(
-        *, job_id: str, command: list[str], workspace: str | None, task_id: str | None = None
-    ):
+    def fake_enqueue(
+        self, *, job_id: str, command: list[str], workspace: str | None, task_id: str = ""
+    ) -> str:
         raise RuntimeError("broker unavailable")
 
-    monkeypatch.setattr("app.jobs.manager.enqueue_job_task", fake_enqueue_job_task)
+    monkeypatch.setattr(
+        "app.jobs.backends.local.LocalBackend.enqueue", fake_enqueue
+    )
 
     workspace = "ws51aa11"
     experiment = "ex51aa11"
@@ -109,9 +113,9 @@ def test_create_job_returns_503_when_enqueue_fails(monkeypatch, tmp_path: Path) 
 def test_create_job_preserves_running_status_when_worker_starts_immediately(
     monkeypatch, tmp_path: Path
 ) -> None:
-    def fake_enqueue_job_task(
-        *, job_id: str, command: list[str], workspace: str | None, task_id: str | None = None
-    ):
+    def fake_enqueue(
+        self, *, job_id: str, command: list[str], workspace: str | None, task_id: str = ""
+    ) -> str:
         job_file = tmp_path / "state" / "jobs" / f"{job_id}.json"
         payload = json.loads(job_file.read_text(encoding="utf-8"))
         payload["status"] = "running"
@@ -122,9 +126,11 @@ def test_create_job_preserves_running_status_when_worker_starts_immediately(
             "updated_at": 1_772_339_000.0,
         }
         job_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        return _DummyAsyncResult(task_id or "fast-task-id")
+        return task_id or "fast-task-id"
 
-    monkeypatch.setattr("app.jobs.manager.enqueue_job_task", fake_enqueue_job_task)
+    monkeypatch.setattr(
+        "app.jobs.backends.local.LocalBackend.enqueue", fake_enqueue
+    )
 
     workspace = "ws51aa23"
     experiment = "ex51aa23"
@@ -149,14 +155,16 @@ def test_create_job_preserves_running_status_when_worker_starts_immediately(
 def test_delete_jobs_skips_queued_jobs(monkeypatch, tmp_path: Path) -> None:
     seq = 0
 
-    def fake_enqueue_job_task(
-        *, job_id: str, command: list[str], workspace: str | None, task_id: str | None = None
-    ):
+    def fake_enqueue(
+        self, *, job_id: str, command: list[str], workspace: str | None, task_id: str = ""
+    ) -> str:
         nonlocal seq
         seq += 1
-        return _DummyAsyncResult(task_id or f"task-{seq}")
+        return task_id or f"task-{seq}"
 
-    monkeypatch.setattr("app.jobs.manager.enqueue_job_task", fake_enqueue_job_task)
+    monkeypatch.setattr(
+        "app.jobs.backends.local.LocalBackend.enqueue", fake_enqueue
+    )
 
     workspace = "ws51aa12"
     experiment = "ex51aa12"
@@ -347,10 +355,10 @@ def test_list_jobs_keeps_running_when_worker_state_unknown(
     assert got[0].status == "running"
 
 
-def test_worker_known_task_ids_returns_none_when_state_apis_fail(
+def test_celery_backend_active_task_ids_returns_none_when_state_apis_fail(
     monkeypatch, tmp_path: Path
 ) -> None:
-    manager = JobsManager(ConfigManager(tmp_path))
+    from app.jobs.backends.celery import CeleryBackend
 
     class _FlakyInspect:
         def ping(self):
@@ -366,10 +374,15 @@ def test_worker_known_task_ids_returns_none_when_state_apis_fail(
             raise RuntimeError("scheduled failed")
 
     monkeypatch.setattr(
-        "app.jobs.manager.celery_app.control.inspect",
+        "app.jobs.backends.celery.celery_app.control.inspect",
         lambda timeout=1.0: _FlakyInspect(),
     )
 
+    backend = CeleryBackend()
+    assert backend.active_task_ids() is None
+
+    # manager は backend の None（状態不明）をそのまま伝播する（fail/open）。
+    manager = JobsManager(ConfigManager(tmp_path), backend=backend)
     assert manager._worker_known_task_ids() is None
 
 
@@ -558,10 +571,10 @@ def test_cancel_queued_job_marks_canceled_and_logs(monkeypatch, tmp_path: Path) 
 
     revoked: list[dict] = []
 
-    def fake_revoke(task_id: str, terminate: bool = False, signal: str = "SIGTERM"):
-        revoked.append({"task_id": task_id, "terminate": terminate, "signal": signal})
+    def fake_revoke(self, task_id: str, *, terminate: bool = False):
+        revoked.append({"task_id": task_id, "terminate": terminate})
 
-    monkeypatch.setattr("app.jobs.manager.celery_app.control.revoke", fake_revoke)
+    monkeypatch.setattr("app.jobs.backends.local.LocalBackend.revoke", fake_revoke)
 
     job = JobRecord(
         id="abababababababababababababababab",
@@ -583,7 +596,6 @@ def test_cancel_queued_job_marks_canceled_and_logs(monkeypatch, tmp_path: Path) 
         {
             "task_id": "11111111-2222-3333-4444-555555555555",
             "terminate": False,
-            "signal": "SIGTERM",
         }
     ]
     log_path = tmp_path / "state" / "jobs" / f"{job.id}.log"
@@ -599,10 +611,10 @@ def test_cancel_queued_job_with_started_at_terminates_worker(monkeypatch, tmp_pa
 
     revoked: list[dict] = []
 
-    def fake_revoke(task_id: str, terminate: bool = False, signal: str = "SIGTERM"):
-        revoked.append({"task_id": task_id, "terminate": terminate, "signal": signal})
+    def fake_revoke(self, task_id: str, *, terminate: bool = False):
+        revoked.append({"task_id": task_id, "terminate": terminate})
 
-    monkeypatch.setattr("app.jobs.manager.celery_app.control.revoke", fake_revoke)
+    monkeypatch.setattr("app.jobs.backends.local.LocalBackend.revoke", fake_revoke)
 
     job = JobRecord(
         id="10101010101010101010101010101010",
@@ -624,7 +636,6 @@ def test_cancel_queued_job_with_started_at_terminates_worker(monkeypatch, tmp_pa
         {
             "task_id": "22222222-3333-4444-5555-666666666666",
             "terminate": True,
-            "signal": "SIGTERM",
         }
     ]
 
@@ -663,13 +674,15 @@ def test_rerun_done_job_creates_new_queued_job(monkeypatch, tmp_path: Path) -> N
 
     seq = {"n": 0}
 
-    def fake_enqueue_job_task(
-        *, job_id: str, command: list[str], workspace: str | None, task_id: str | None = None
-    ):
+    def fake_enqueue(
+        self, *, job_id: str, command: list[str], workspace: str | None, task_id: str = ""
+    ) -> str:
         seq["n"] += 1
-        return _DummyAsyncResult(task_id or f"task-rerun-{seq['n']}")
+        return task_id or f"task-rerun-{seq['n']}"
 
-    monkeypatch.setattr("app.jobs.manager.enqueue_job_task", fake_enqueue_job_task)
+    monkeypatch.setattr(
+        "app.jobs.backends.local.LocalBackend.enqueue", fake_enqueue
+    )
 
     source = JobRecord(
         id="efefefefefefefefefefefefefefefef",

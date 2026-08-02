@@ -99,9 +99,20 @@ workspaces/
 
 ### Requirements
 
-- Docker
-- Docker Compose
+**Single machine (default): Docker is not required.**
+
+- Python 3.12+ and a virtualenv (`core/.venv`)
+- Jobs (training / inference / embedding) run **in-process** inside the API,
+  so no broker (redis) and no separate worker process are needed.
+
+Optional — only for distributed execution (GPU worker / multiple machines):
+
+- Docker + Docker Compose
 - (Optional) NVIDIA GPU + Docker GPU support
+- Set `XIMA_JOB_BACKEND=celery` and `XIMA_CELERY_BROKER_URL`
+
+> Note: stopping the API also stops any running job. On the next start those jobs
+> are recorded as `error` (see Decision 036).
 
 ---
 
