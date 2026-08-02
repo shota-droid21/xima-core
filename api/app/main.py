@@ -11,6 +11,7 @@ from .local_mode import local_cors_origins, mount_app_static, setup_local_mode
 from .clustering import create_clustering_router
 from .config import ConfigManager
 from .demo import create_demo_router
+from .entitlement import create_entitlement_router
 from .experiments import create_experiments_router
 from .images import create_images_router
 from .jobs.manager import JobsManager, create_jobs_router
@@ -52,6 +53,7 @@ app.include_router(create_jobs_router(jobs_manager))
 app.include_router(create_pairing_router(config_manager))
 app.include_router(create_demo_router(config_manager, jobs_manager))
 app.include_router(create_clustering_router(config_manager))
+app.include_router(create_entitlement_router(config_manager))
 
 # nginx 非在のネイティブ起動では core 自身が /static /thumbs を配信する
 # （XIMA_SERVE_FILES_NATIVE。Docker/nginx 構成では登録しない＝挙動不変）。
