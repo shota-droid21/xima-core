@@ -80,7 +80,7 @@ print_result_summary() {
   local result="$1"
   echo
   print_section
-  echo "xima-agent launcher result"
+  echo "xima-core launcher result"
   print_section
   printf "Result        : %s\n" "${result}"
   printf "Operation     : %s\n" "${OPERATION:-unknown}"
@@ -158,7 +158,7 @@ normalize_launcher_config_values() {
 
 save_launcher_config() {
   {
-    echo "# xima-agent launcher config (auto-generated)"
+    echo "# xima-core launcher config (auto-generated)"
     echo "# Edit values manually if you want to change defaults for start/restart/rebuild."
     printf 'AUTH_MODE=%q\n' "${AUTH_MODE}"
     printf 'GPU_PROFILE=%q\n' "${GPU_PROFILE}"
@@ -236,7 +236,7 @@ build_compose_cmd() {
 prompt_operation() {
   local answer
   print_section
-  echo "xima-agent interactive launcher"
+  echo "xima-core interactive launcher"
   print_section
   while true; do
     cat <<'EOF'

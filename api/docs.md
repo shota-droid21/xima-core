@@ -1,6 +1,6 @@
-# xima-agent (FastAPI MVP)
+# xima-core (FastAPI)
 
-Local agent for CPU/GPU hosts (NVIDIA CUDA and Apple Silicon Metal/MPS). No DB; state and config live under `state/`. Listens on `127.0.0.1:27800` (direct) or `127.0.0.1:27801` via docker-compose nginx.
+Local engine for CPU/GPU hosts (NVIDIA CUDA and Apple Silicon Metal/MPS). No DB; state and config live under `state/`. Listens on `127.0.0.1:27800` (direct) or `127.0.0.1:27801` via docker-compose nginx.
 
 ## Workspace layout (recommended)
 
@@ -227,7 +227,9 @@ rsync -av ../01_processing/downloads/ ./workspaces/ws_test/source_images/
 
 ## CORS
 
-MVP uses `allow_origins=["*"]`. Restrict to SaaS domains for production.
+`open` モードは `allow_origins=["*"]`（開発 / CI 用）。既定の `local` モードでは
+自身のオリジンに限定され、`X-Xima-Local-Key` ヘッダが必須になる（`../README.md` の
+Authentication Mode を参照）。
 
 ## Notes
 

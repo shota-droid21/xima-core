@@ -1,8 +1,12 @@
-# Agent API Reference
+# xima-core API Reference
 
-このドキュメントはローカルエージェントの公開 HTTP API を網羅します。主要な用途はワークスペース／実験の管理、ラベル操作、画像取得、ジョブ実行（スクリプト呼び出し）、およびヘルスチェックです。
+このドキュメントは xima-core の公開 HTTP API を網羅します。主要な用途はワークスペース／実験の管理、ラベル操作、画像取得、ジョブ実行（スクリプト呼び出し）、およびヘルスチェックです。
 
-ベース URL: `http://{host}:{port}`（docker-compose のデフォルトは `127.0.0.1:27801`）
+ベース URL: `http://{host}:{port}`（`scripts/run-local.sh` の既定は `127.0.0.1:27800`。任意の docker-compose 構成では `127.0.0.1:27801`）
+
+認証: 既定の `local` モードでは、`/health` と `/local/session` を除くすべての経路に
+`X-Xima-Local-Key` ヘッダが必要です（`README.md` の Authentication Mode を参照）。
+以下の例は簡潔さのためヘッダを省略しています。`XIMA_AGENT_AUTH_MODE=open` ではヘッダ不要です。
 
 共通のパス規約:
 

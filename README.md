@@ -4,14 +4,18 @@
 It runs entirely on your machine and provides labeling, dataset preparation,
 and training pipelines via a local API.
 
-This repository contains **only the agent** (API + pipelines).  
-The SaaS UI and cloud services are **not included** here.
+This repository contains the **core engine** (API + ML pipelines), released under
+Apache-2.0. The graphical UI is a separate, proprietary bundle that is fetched at
+setup time — it is **not part of this repository**. Everything here works without
+it via the HTTP API and CLI.
+
+There is no cloud service. Nothing is uploaded anywhere.
 
 ---
 
 ## What xima-core is
 
-- A **local ML agent** for image labeling and training
+- A **local ML engine** for image labeling and training
 - Runs on your own machine (CPU / GPU)
 - Exposes a local HTTP API (FastAPI)
 - Uses the **filesystem as the source of truth**
@@ -82,9 +86,9 @@ workspaces/
 ### Workspace as User-Owned Asset
 
 - `workspaces/` is the canonical source of truth
-- Agent containers are replaceable
+- The engine is replaceable; your data is not tied to any runtime
 - Copying `workspaces/` enables full recovery on a new machine
-- Docker mounts `workspaces/` as a volume by design
+- In the optional Docker setup, `workspaces/` is mounted as a volume by design
 
 **Note on `source_images`:**
 
@@ -151,9 +155,10 @@ Relevant environment variables:
 
 ---
 
-### Start the Agent (Docker / distributed)
+### Docker setup (optional — distributed execution only)
 
-Only needed for distributed execution. Interactive launcher:
+**You do not need this for normal use.** It exists for running jobs on a separate
+GPU worker or across machines (`XIMA_JOB_BACKEND=celery`). Interactive launcher:
 
 ```bash
 ./scripts/agent-launcher.sh
@@ -187,17 +192,14 @@ docker compose up -d --build
 
 ### Try It with Demo Data (optional)
 
-To try labeling and training without preparing your own images:
-
-```bash
-./scripts/agent-launcher.sh   # choose: 7) demo
-```
-
-Or call the API directly:
+To try labeling and training without preparing your own images, use the
+**"Create demo workspace"** button in the UI, or call the API directly:
 
 ```bash
 curl -X POST http://127.0.0.1:27800/demo
 ```
+
+(The Docker launcher also offers this as menu item `7) demo`.)
 
 This creates a workspace/experiment with 36 generated sample images
 (`circle` / `square` / `triangle`, 12 each), a matching label schema,
@@ -211,125 +213,36 @@ no binary blobs in the repository, and reproducible (fixed seed).
 
 ### Authentication Mode
 
-`xima-core` supports two authentication modes controlled by `XIMA_AGENT_AUTH_MODE`:
+`xima-core` has three authentication modes, selected with `XIMA_AGENT_AUTH_MODE`.
 
-- `open` (default): no authentication. nginx does **not** call `auth_request`.
-- `external`: JWT validation with an external identity provider. nginx uses `auth_request` to call the agent's `/_auth`.
+| Mode | Purpose | How it works |
+| --- | --- | --- |
+| `local` **(default)** | Single-user desktop use | Binds to loopback only, restricts CORS to its own origin, and requires a per-start secret header (`X-Xima-Local-Key`). The secret is stored in `state/.local_secret` (mode 0600) and handed to the UI same-origin via `/local/session`. |
+| `open` | Development / CI | No authentication. Trusted environments only. |
+| `external` | Reserved for a future control plane | JWT validation against an external issuer. **Currently dormant** — kept so that a future manager can become the token issuer without a rewrite. |
 
-Examples:
+`scripts/run-local.sh` starts in `local` mode. You normally do not need to set
+this variable.
 
 ```bash
-# Open mode (default)
-docker compose up -d --build
-
-# External mode (keeps the existing auth_request behavior)
-XIMA_AGENT_AUTH_MODE=external docker compose up -d --build
+# Development / CI, no auth
+XIMA_AGENT_AUTH_MODE=open ./scripts/run-local.sh
 ```
 
-Note:
+`local` mode protects against one specific threat: a web page in your browser
+reaching your `localhost` API cross-origin. It cannot protect against another
+process running as the same OS user — that would require OS-level sandboxing.
 
-- In `open` mode, nginx will attach dummy identity headers such as `X-User-Id` for downstream compatibility.
-- `open` mode is intended for trusted/local environments only.
+#### External mode (dormant)
 
-External mode JWT auth can use Redis whitelist cache (enabled by default):
+Kept for a future control plane; there is no issuer shipped with xima-core today.
+When enabled, nginx uses `auth_request` against `/_auth`, and a Redis whitelist
+cache is available:
 
 - `XIMA_AGENT_AUTH_WHITELIST_ENABLED` (default: `1`)
 - `XIMA_AGENT_AUTH_WHITELIST_TTL_SECONDS` (default: `300`)
 - `XIMA_AGENT_AUTH_WHITELIST_REDIS_URL` (default: `redis://redis:6379/1`)
 - `XIMA_AGENT_AUTH_WHITELIST_KEY_PREFIX` (default: `xima:auth:whitelist:v1`)
-
-### External Auth Test: Multi-Agent (4 nodes)
-
-For local reproducibility tests with multiple external-auth-mode agents:
-
-```bash
-docker compose -f docker-compose.ext-test-multi.yml up -d --build
-```
-
-- agent-1: `http://127.0.0.1:27901`
-- agent-2: `http://127.0.0.1:27902`
-- agent-3: `http://127.0.0.1:27903`
-- agent-4: `http://127.0.0.1:27904`
-
-Each node has isolated runtime data:
-
-- workspace: `workspaces-ext-test-{1..4}`
-- state: `api/state-ext-test-{1..4}`
-
----
-
-## Pairing (OTP) (external mode only)
-
-Pairing is an additional safety step for **external mode** to prove that the user can interact with the agent machine.
-
-This repository implements **Step A** and **Step B** only:
-
-- Step A: generate an OTP challenge and save it to `workspaces/.xima/pairing.json`
-- Step B: verify OTP via REST and return a short-lived signed proof (exp=90s)
-
-**TODO (not implemented in this session):**
-
-- Step C+: SaaS backend must verify the proof signature, bind agent↔user, and persist in DB.
-
-### Step A: start pairing on the agent machine
-
-Run the pairing start script (inside the api container is the easiest):
-
-```bash
-docker exec -it xima-agent-api python -m app.tools.pair_start --workspaces /data/workspaces
-```
-
-It prints:
-
-- `OTP` (you will type this into the UI)
-- `expires_at` (OTP is valid for 90 seconds)
-
-If an unused challenge still exists, `pair_start` invalidates it and issues a new OTP.
-
-It also writes state under workspaces:
-
-- `workspaces/.xima/pairing.json` (challenge state, otp_hash only)
-- `workspaces/.xima/keys/agent_ed25519_private.pem`
-- `workspaces/.xima/keys/agent_ed25519_public.pem`
-
-### Step B: prove OTP via REST
-
-In **external mode** only:
-
-```bash
-XIMA_AGENT_AUTH_MODE=external docker compose up -d --build
-```
-
-Then call:
-
-```bash
-curl -sS -X POST http://127.0.0.1:27801/auth/pair/prove \
-   -H 'Content-Type: application/json' \
-   -d '{"otp":"123-456","client_name":"chrome-macbook"}' | jq
-```
-
-Success returns a signed proof payload + signature.
-
-Note:
-
-- `/auth/pair/prove` is intentionally **unauthenticated** (OTP-only) and is excluded from nginx `auth_request`.
-- The expected workflow is: user performs Step A/B locally → send the proof body to SaaS → SaaS verifies and then issues API JWTs for subsequent agent API calls.
-
-Replay/expiry rules:
-
-- Reusing the same OTP after successful prove => **409**
-- After `expires_at` => **410**
-
-By default:
-
-- API: `http://127.0.0.1:27800`
-- Static image access (nginx): `http://127.0.0.1:27801`
-
-Health check:
-
-```bash
-curl http://127.0.0.1:27800/health
-```
 
 ---
 
@@ -341,8 +254,8 @@ xima-core can be used in three ways:
 2. **CLI / scripts**
 3. **Custom UI or automation**
 
-The official xima UI (Plus features) communicates with xima-core
-via the same local API.
+The official xima UI communicates with xima-core over this same local API —
+it has no privileged access, so anything the UI can do is scriptable.
 
 ---
 
@@ -425,7 +338,18 @@ for the full terms and [`NOTICE`](NOTICE) for attribution and third-party notice
 
 ## Relationship to xima
 
-- **xima-core**: public, free, local core
-- **xima (SaaS/UI)**: account management, Plus UI features, convenience tooling
+xima is a **local-first desktop product**. There is no server component and no
+account: everything runs on your machine.
 
-xima-core will always remain usable on its own.
+| Part | License | Where it lives |
+| --- | --- | --- |
+| **xima-core** (this repository) — API, ML pipelines, workspaces | Apache-2.0 | Public |
+| **xima app** — the graphical UI | Proprietary | Prebuilt bundle fetched by `setup.sh` |
+
+The app talks to xima-core over the same local HTTP API documented here — it has no
+privileged access. **xima-core is fully usable on its own**, via the API or the CLI,
+and every core capability is available without the UI.
+
+Paid ("Plus") capabilities, if and when they exist, are unlocked by a signed
+entitlement verified locally. They add automation on top of the loop; they do not
+gate the core pipeline.

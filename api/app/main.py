@@ -17,13 +17,14 @@ from .images import create_images_router
 from .jobs.manager import JobsManager, create_jobs_router
 from .label_input import create_label_input_router
 from .native_files import create_native_files_router, native_file_serving_enabled
-from .pairing_api import create_pairing_router
 from .trash import create_trash_router
 from .validate import create_validate_router
 from .utils.identity import ensure_identity
 from .workspace import create_workspace_router
 
-app = FastAPI(title="xima-agent", version="0.1.0")
+# OpenAPI のタイトル（/docs に表示される）。ワイヤ契約ではないので対外名に合わせる。
+# health レスポンスの "agent" フィールドは契約なので下記のとおり据え置く。
+app = FastAPI(title="xima-core", version="0.1.0")
 
 # local モードは CORS を app オリジン限定（既定は同一オリジンのみ）。
 # open / external は従来どおり無制限（既存挙動を保つ）。
@@ -50,7 +51,6 @@ app.include_router(create_label_input_router(config_manager))
 app.include_router(create_images_router(config_manager))
 app.include_router(create_trash_router(config_manager))
 app.include_router(create_jobs_router(jobs_manager))
-app.include_router(create_pairing_router(config_manager))
 app.include_router(create_demo_router(config_manager, jobs_manager))
 app.include_router(create_clustering_router(config_manager))
 app.include_router(create_entitlement_router(config_manager))
@@ -78,7 +78,7 @@ def health() -> dict:
         "install_id": identity.install_id,
         "container_id": identity.container_id,
         "agent_version": identity.agent_version,
-        # Backward compatibility
+        # Backward compatibility（ワイヤ契約。app が読むため改称しない・docs/13 参照）
         "version": identity.agent_version,
         "agent": "xima-agent",
     }
