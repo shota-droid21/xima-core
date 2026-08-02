@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Tuple
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 
 from .config import ConfigManager
 from .label_input import load_label_json
+from .native_files import native_file_serving_enabled
 from .utils.legacy import PATH_KEYS, normalize_to_source_rel
 from .utils.paths import is_subpath
 from .utils.short_id import require_experiment_id, require_workspace_id
@@ -167,7 +168,17 @@ def _x_accel_file_response(
 
     Nginx must provide an internal location mapping:
       location /_internal_ws/ { internal; alias /data/workspaces/; }
+
+    nginx 非在のネイティブ起動（XIMA_SERVE_FILES_NATIVE）では core 自身が
+    FileResponse で実配信する（X-Accel は nginx が居ないと無視されるため）。
     """
+
+    if native_file_serving_enabled():
+        return FileResponse(
+            file_path,
+            media_type=media_type,
+            headers={"Cache-Control": cache_control},
+        )
 
     # We intentionally return no body; nginx will serve the file.
     headers = {

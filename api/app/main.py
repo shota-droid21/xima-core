@@ -15,6 +15,7 @@ from .experiments import create_experiments_router
 from .images import create_images_router
 from .jobs.manager import JobsManager, create_jobs_router
 from .label_input import create_label_input_router
+from .native_files import create_native_files_router, native_file_serving_enabled
 from .pairing_api import create_pairing_router
 from .trash import create_trash_router
 from .validate import create_validate_router
@@ -51,6 +52,11 @@ app.include_router(create_jobs_router(jobs_manager))
 app.include_router(create_pairing_router(config_manager))
 app.include_router(create_demo_router(config_manager, jobs_manager))
 app.include_router(create_clustering_router(config_manager))
+
+# nginx 非在のネイティブ起動では core 自身が /static /thumbs を配信する
+# （XIMA_SERVE_FILES_NATIVE。Docker/nginx 構成では登録しない＝挙動不変）。
+if native_file_serving_enabled():
+    app.include_router(create_native_files_router(config_manager))
 
 # local モードのハンドシェイク（ミドルウェア + /local/session）。
 setup_local_mode(app, config_manager)
