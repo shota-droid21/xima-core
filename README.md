@@ -116,18 +116,44 @@ Optional — only for distributed execution (GPU worker / multiple machines):
 
 ---
 
-### Clone
+### Install and run (recommended)
 
 ```bash
 git clone https://github.com/<your-org>/xima-core.git
 cd xima-core
+./scripts/setup.sh
+./scripts/run-local.sh
 ```
+
+Then open <http://127.0.0.1:27800> in your browser.
+
+`setup.sh` creates `core/.venv`, installs dependencies, fetches the prebuilt UI, and
+initialises `workspaces/` and `state/`. It is **idempotent** — re-running it skips
+anything that has not changed, and it never writes into `workspaces/`.
+
+| Option | Effect |
+| --- | --- |
+| `--no-ui` | API / CLI only. No UI is fetched or built. |
+| `--no-ml` | Skip torch / CLIP. Training and inference are unavailable. |
+| `--help` | Show usage. |
+
+Relevant environment variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `XIMA_PYTHON` | Use a specific `python3` |
+| `XIMA_APP_DIST_URL` | Fetch the UI bundle from an explicit URL |
+| `XIMA_WORKSPACES_ROOT` | Where workspaces live (default `core/workspaces`) |
+| `XIMA_PORT` | API port (default `27800`) |
+
+> The UI is distributed as a prebuilt bundle and is **not** part of this
+> Apache-2.0 repository. Use `--no-ui` if you only need the API / CLI.
 
 ---
 
-### Start the Agent
+### Start the Agent (Docker / distributed)
 
-Interactive launcher (recommended):
+Only needed for distributed execution. Interactive launcher:
 
 ```bash
 ./scripts/agent-launcher.sh
