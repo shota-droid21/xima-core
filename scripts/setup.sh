@@ -48,8 +48,11 @@ IS_MONOREPO=0
 [ -f "$APP_SRC_DIR/package.json" ] && IS_MONOREPO=1
 
 # app dist の取得元。monorepo ではローカルビルドにフォールバックする。
+#
+# 既定は**公開 core リポジトリ**。この分岐に来るのは公開 core を clone した利用者だけで
+# あり、開発 monorepo（private・匿名では落とせない）を向けても取得できないため。
 APP_DIST_URL="${XIMA_APP_DIST_URL:-}"
-RELEASE_REPO="${XIMA_RELEASE_REPO:-shota-droid21/xima}"
+RELEASE_REPO="${XIMA_RELEASE_REPO:-shota-droid21/xima-core}"
 
 WANT_UI=1
 WANT_ML=1

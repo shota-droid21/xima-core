@@ -1,0 +1,109 @@
+name: CI
+
+# 公開 core リポジトリ（xima-core）用の CI。
+#
+# 【このファイルが動く場所】
+#   monorepo では実行されない。GitHub はリポジトリ**ルート**の .github/workflows/ しか
+#   読まないため、monorepo 上の core/.github/workflows/ci.yml は単なるファイルである。
+#   subtree split（--prefix=core）で公開 repo に切り出された時点で、これがルートの
+#   .github/workflows/ci.yml になり、はじめて実行される（Decision 035 / #53）。
+#
+# 【monorepo 側の CI との違い】
+#   monorepo: self-hosted runner・app（UI）の型チェックとビルドを含む
+#   公開 core: GitHub-hosted runner・core だけ。app は proprietary で存在しない
+#
+#   したがって依存のキャッシュ戦略も異なる。self-hosted の「clean:false で venv を
+#   持ち越す」方式は使えないので、actions/setup-python の pip キャッシュに任せる。
+#
+# 【パスについて】
+#   公開 repo では core の中身がルートに来る。monorepo の core/api は api、
+#   core/scripts は scripts になる。working-directory はその前提で書く。
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # scripts/setup.sh が要求する下限（3.12）と、その次のバージョンで回す。
+        # 下限を CI で踏まないと、README の前提だけが古くなる。
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            api/requirements.base.txt
+            api/requirements.dev.txt
+
+      - name: Install test dependencies
+        working-directory: api
+        run: |
+          set -euo pipefail
+          # 本体テスト（API ルート / jobs / auth）は torch / CLIP を必要としない。
+          # requirements.jobs.txt は入れない（CI が数分 → 十数分になるため）。
+          python -m pip install --upgrade --quiet --disable-pip-version-check pip
+          python -m pip install --quiet --disable-pip-version-check --prefer-binary -r requirements.dev.txt
+
+      - name: Run pytest
+        working-directory: api
+        run: python -m pytest -q
+
+  setup-smoke:
+    name: setup.sh smoke (README の手順が通るか)
+    runs-on: ubuntu-latest
+
+    # README は「clone して setup.sh を叩く」だけを案内している。この経路が壊れると
+    # 公開リポジトリが「手順どおりにやると動かない」状態で放置される。pytest では
+    # 検出できないため、実際にスクリプトを走らせて確認する。
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run setup.sh (UI / ML なし)
+        run: |
+          set -euo pipefail
+          # --no-ui: app dist は proprietary で Releases 依存。CI では取得しない。
+          # --no-ml: torch を入れると CI が極端に遅くなる。導線の検証が目的。
+          ./scripts/setup.sh --no-ui --no-ml
+
+      - name: Assert setup result
+        run: |
+          set -euo pipefail
+          test -x .venv/bin/python   || { echo "error: .venv が作られていません" >&2; exit 1; }
+          test -d workspaces         || { echo "error: workspaces が作られていません" >&2; exit 1; }
+          test -d api/state/jobs     || { echo "error: state/jobs が作られていません" >&2; exit 1; }
+          # API が import できること（= 依存の取りこぼしがないこと）を確認する。
+          ( cd api && ../.venv/bin/python -c "import app.main" )
+          echo "ok: setup.sh の導線は健全です"
+
+      - name: Re-run setup.sh (冪等性)
+        run: |
+          set -euo pipefail
+          # README は再実行を安全と謳っている。2 回目が壊れないことを確認する。
+          ./scripts/setup.sh --no-ui --no-ml

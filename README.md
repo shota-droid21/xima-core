@@ -123,7 +123,7 @@ Optional — only for distributed execution (GPU worker / multiple machines):
 ### Install and run (recommended)
 
 ```bash
-git clone https://github.com/<your-org>/xima-core.git
+git clone https://github.com/shota-droid21/xima-core.git
 cd xima-core
 ./scripts/setup.sh
 ./scripts/run-local.sh
