@@ -1,7 +1,23 @@
+# 注意: 公開 core リポジトリ（subtree split）では本ファイルが**ルートの .gitignore**
+# になる。monorepo ルートの .gitignore は split に含まれないため、公開 repo で必要な
+# 除外はすべてここに書く必要がある（Decision 035 / #53）。
+
+# Python / エディタ（monorepo ではルートの .gitignore が担当する分）
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+
 # core runtime state (generated)
 api/state/**
 api/state-open/**
 api/state-saas-test-*/
+
+# app dist（proprietary）: setup.sh が Releases から配置する生成物。
+# Apache-2.0 の公開 core に proprietary バイナリを混在させない。
+app-dist/
 
 # workspace data
 # workspaces はユーザ資産（画像 / labels.json / 学習成果物）であり、絶対にコミットしない。
