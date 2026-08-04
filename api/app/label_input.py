@@ -10,6 +10,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, Body, HTTPException
 
 from .config import ConfigManager
+from .utils.atomic_io import write_json_atomic, write_text_atomic
 from .utils.legacy import PATH_KEYS, normalize_to_source_rel
 
 
@@ -447,9 +448,7 @@ def ensure_label_file(cfg, workspace: str, experiment: str) -> Path:
     label_path.parent.mkdir(parents=True, exist_ok=True)
     _migrate_legacy_current_if_needed(label_path)
     if not label_path.exists():
-        label_path.write_text(
-            json.dumps(_labels_template(), ensure_ascii=False, indent=2)
-        )
+        write_json_atomic(label_path, _labels_template())
     (label_path.parent / "history").mkdir(parents=True, exist_ok=True)
     return label_path
 
@@ -458,9 +457,7 @@ def ensure_label_schema_file(cfg, workspace: str, experiment: str) -> Path:
     schema_path = cfg.label_schema_path_for(workspace, experiment)
     schema_path.parent.mkdir(parents=True, exist_ok=True)
     if not schema_path.exists():
-        schema_path.write_text(
-            json.dumps(_schema_template(), ensure_ascii=False, indent=2)
-        )
+        write_json_atomic(schema_path, _schema_template())
     return schema_path
 
 
@@ -487,7 +484,7 @@ def _write_history_snapshot(label_path: Path, serialized: str) -> Path:
                 break
             suffix += 1
 
-    backup_path.write_text(serialized, encoding="utf-8")
+    write_text_atomic(backup_path, serialized)
     return backup_path
 
 
@@ -660,7 +657,7 @@ def create_label_input_router(config_manager: ConfigManager) -> APIRouter:
         normalized_schema = normalize_label_schema_payload(payload)
         validate_label_schema_payload(normalized_schema)
         serialized = json.dumps(normalized_schema, ensure_ascii=False, indent=2)
-        schema_path.write_text(serialized, encoding="utf-8")
+        write_text_atomic(schema_path, serialized)
         version_path = _write_history_snapshot(schema_path, serialized)
         return {
             "status": "saved",
@@ -722,7 +719,7 @@ def create_label_input_router(config_manager: ConfigManager) -> APIRouter:
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="backup not found")
 
-        schema_path.write_text(serialized, encoding="utf-8")
+        write_text_atomic(schema_path, serialized)
         version_path = _write_history_snapshot(schema_path, serialized)
         return {
             "status": "restored",
@@ -780,7 +777,7 @@ def create_label_input_router(config_manager: ConfigManager) -> APIRouter:
                 backup_path = None
 
         serialized = json.dumps(normalized, ensure_ascii=False, indent=2)
-        label_path.write_text(serialized)
+        write_text_atomic(label_path, serialized)
         if backup_path is None:
             backup_path = _write_history_snapshot(label_path, serialized)
 
@@ -881,7 +878,7 @@ def create_label_input_router(config_manager: ConfigManager) -> APIRouter:
             except Exception:
                 current_backup = None
 
-        label_path.write_text(serialized)
+        write_text_atomic(label_path, serialized)
         return {
             "status": "restored",
             "workspace": workspace.strip(),

@@ -24,6 +24,7 @@ from .eval_scores import (
     rows_to_csv,
 )
 from .label_input import load_label_json, normalize_label_thumb_paths
+from .utils.atomic_io import write_json_atomic
 from .utils.legacy import PATH_KEYS, normalize_to_source_rel
 from .utils.meta import ExperimentMeta
 from .utils.short_id import (
@@ -117,7 +118,7 @@ def _ensure_labels_json(label_input_dir: Path) -> bool:
         "items": [],
         "meta": {"created_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "version": "mvp"},
     }
-    labels_path.write_text(json.dumps(template, indent=2))
+    write_json_atomic(labels_path, template)
     return True
 
 
@@ -125,9 +126,7 @@ def _ensure_label_schema(label_input_dir: Path) -> bool:
     schema_path = label_input_dir / "label_schema.json"
     if schema_path.exists():
         return False
-    schema_path.write_text(
-        json.dumps(DEFAULT_LABEL_SCHEMA, ensure_ascii=False, indent=2)
-    )
+    write_json_atomic(schema_path, DEFAULT_LABEL_SCHEMA)
     return True
 
 
@@ -699,9 +698,8 @@ def create_experiments_router(config_manager: ConfigManager) -> APIRouter:
                     workspace=ws_id,
                     experiment=target_exp_id,
                 )
-                (dst_label_input / "labels.json").write_text(
-                    json.dumps(normalized_labels, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
+                write_json_atomic(
+                    dst_label_input / "labels.json", normalized_labels
                 )
                 copied["labels_json"] = True
 
