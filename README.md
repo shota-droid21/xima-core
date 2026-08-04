@@ -1,15 +1,22 @@
 # xima-core
 
 **xima-core** is the local-first core of the xima ecosystem.  
-It runs entirely on your machine and provides labeling, dataset preparation,
-and training pipelines via a local API.
+It provides labeling, dataset preparation, and training pipelines behind a local
+HTTP API, and runs on hardware you control.
 
 This repository contains the **core engine** (API + ML pipelines), released under
 Apache-2.0. The graphical UI is a separate, proprietary bundle that is fetched at
 setup time — it is **not part of this repository**. Everything here works without
 it via the HTTP API and CLI.
 
-There is no cloud service. Nothing is uploaded anywhere.
+There is no account, no API key, and no telemetry. In the default configuration
+the API binds to `127.0.0.1`, and every input and output is a file under
+`workspaces/`.
+
+The one outbound request the engine makes is a **one-time download of the CLIP
+weights** on the first training or inference run (cached under `~/.cache/clip`).
+If the machine has no network access, fetch the weights separately and place them
+in that cache.
 
 ---
 
@@ -26,18 +33,17 @@ xima-core is designed for:
 - ML engineers
 - individual developers
 - hobbyists running experiments locally
-- users who want full ownership of their data
 
 ---
 
 ## What xima-core is NOT
 
-- ❌ A cloud service
-- ❌ A hosted training platform
-- ❌ A no-code ML tool
-- ❌ A data-collecting application
+- A hosted or managed training platform
+- A no-code ML tool
+- A dataset marketplace or model registry
 
-Your images, labels, and models **never leave your machine**.
+The scope is deliberately narrow: label images, build a dataset, train a linear
+head on CLIP embeddings, run inference. Anything past that is out of scope.
 
 ---
 
