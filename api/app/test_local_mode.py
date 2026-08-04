@@ -58,6 +58,21 @@ def test_local_mode_health_is_exempt(tmp_path: Path, monkeypatch) -> None:
     assert client.get("/health").status_code == 200
 
 
+def test_local_mode_browser_static_is_exempt(tmp_path: Path, monkeypatch) -> None:
+    """ブラウザが自動取得する静的物は key 無しで 401 にならないこと。
+
+    これらは JS を経由せずブラウザ自身が要求するため X-Xima-Local-Key を載せられない。
+    免除が漏れると「タブに既定アイコンが出るだけ」という気づきにくい失敗になる
+    （実際に /favicon.svg の免除漏れで発生した）。
+
+    app dist を mount していないので 404 になるが、**401 でなければ免除は効いている**。
+    """
+    monkeypatch.setenv("XIMA_AGENT_AUTH_MODE", "local")
+    client, _ = _make_client(tmp_path)
+    for path in ("/favicon.svg", "/favicon.ico", "/apple-touch-icon.png"):
+        assert client.get(path).status_code != 401, path
+
+
 def test_local_session_rejects_foreign_origin(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("XIMA_AGENT_AUTH_MODE", "local")
     client, _ = _make_client(tmp_path)

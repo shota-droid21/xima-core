@@ -16,7 +16,24 @@ from .auth_mode import AUTH_MODE_LOCAL, resolve_agent_auth_mode
 from .local_auth import LOCAL_KEY_HEADER, get_or_create_local_secret, verify_local_key
 
 # key 検証を免除するパス（app がまだ key を持てない導線・静的配信・ヘルス）。
-_EXEMPT_EXACT = frozenset({"/health", "/_auth", "/local/session", "/favicon.ico"})
+#
+# app シェルの静的物をここに入れる必要があるのは、**ブラウザが自動で取りに行く
+# サブリソースには X-Xima-Local-Key を載せられない**ため。favicon や manifest は
+# ページの JS を経由せずブラウザ自身が要求するので、免除しないと 401 になり、
+# 「タブに既定アイコンが出るだけ」という原因の分かりにくい形で失敗する。
+_EXEMPT_EXACT = frozenset(
+    {
+        "/health",
+        "/_auth",
+        "/local/session",
+        # ブラウザが自動取得する既知の静的物。app dist に無ければ 404 になるだけで害はない。
+        "/favicon.ico",
+        "/favicon.svg",
+        "/apple-touch-icon.png",
+        "/manifest.webmanifest",
+        "/robots.txt",
+    }
+)
 _EXEMPT_PREFIX = ("/assets", "/local/")
 
 
