@@ -167,6 +167,17 @@ fi
 
 step "[4/5] UI（app）を用意します"
 
+# 取得した app dist の版を表示する。setup.sh は releases/latest を参照するため、
+# これが無いと再実行しても「更新がかかったのか」を利用者が判別できない（#174）。
+report_app_dist_version() {
+  if [ -f "$APP_DIST_DIR/VERSION" ]; then
+    info "app のバージョン: $(cat "$APP_DIST_DIR/VERSION")"
+  else
+    # v0.1.2 以前のアセットには VERSION が入っていない。
+    info "app のバージョン: 不明（この版の書庫にはバージョン情報がありません）"
+  fi
+}
+
 fetch_and_extract() {
   # $1: URL
   local url="$1"
@@ -196,6 +207,7 @@ elif [ -n "$APP_DIST_URL" ]; then
     || die "app dist を取得できませんでした: $APP_DIST_URL
   URL を確認するか、--no-ui で API / CLI のみの構成にしてください。"
   info "配置: $APP_DIST_DIR"
+  report_app_dist_version
 elif [ "$IS_MONOREPO" = "1" ]; then
   # monorepo: app/ のソースがあるのでローカルビルド
   command -v npm >/dev/null 2>&1 \
@@ -205,11 +217,13 @@ elif [ "$IS_MONOREPO" = "1" ]; then
   ( cd "$APP_SRC_DIR" && npm install --silent && npm run build )
   [ -f "$APP_SRC_DIR/dist/index.html" ] || die "app のビルドに失敗しました（app/dist/index.html がありません）"
   info "ビルド完了: $APP_SRC_DIR/dist"
+  info "app のバージョン: $(cat "$CORE_ROOT/VERSION" 2>/dev/null || echo 不明)（ローカルビルド）"
 else
   # 公開 core: Releases から取得
   url="https://github.com/${RELEASE_REPO}/releases/latest/download/xima-app-dist.tar.gz"
   if fetch_and_extract "$url"; then
     info "配置: $APP_DIST_DIR"
+    report_app_dist_version
   else
     die "app dist を Releases から取得できませんでした。
     取得元: $url
@@ -235,9 +249,23 @@ info "state: $STATE_DIR"
 
 # --------------------------------------------------------------------- done
 
+# core と app は別々に更新される（core = git pull / app = setup.sh 再実行）ため、
+# 版はばらつきうる（Decision 039-3）。1 つにまとめず両方を出す（#174）。
+CORE_VERSION_TEXT="$(cat "$CORE_ROOT/VERSION" 2>/dev/null || echo 不明)"
+if [ "$WANT_UI" = "1" ] && [ -f "$APP_DIST_DIR/VERSION" ]; then
+  APP_VERSION_TEXT="$(cat "$APP_DIST_DIR/VERSION")"
+elif [ "$WANT_UI" = "1" ]; then
+  APP_VERSION_TEXT="不明"
+else
+  APP_VERSION_TEXT="（--no-ui）"
+fi
+
 cat <<EOS
 
 セットアップが完了しました。
+
+  core: ${CORE_VERSION_TEXT}
+  app : ${APP_VERSION_TEXT}
 
   次のコマンドで起動します:
 

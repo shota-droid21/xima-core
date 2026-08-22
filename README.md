@@ -161,6 +161,43 @@ Relevant environment variables:
 
 ---
 
+### Updating
+
+xima does **not** update itself. Two parts ship separately, so updating takes two steps:
+
+```bash
+git pull                # core (this repository)
+./scripts/setup.sh      # UI bundle — re-fetches the latest release
+```
+
+`setup.sh` always re-fetches the UI bundle, so re-running it is how you pick up UI fixes.
+Python dependencies are skipped when `requirements` have not changed, and `workspaces/`
+is never touched.
+
+**Checking what you are running.** `setup.sh` prints both versions when it finishes:
+
+```
+セットアップが完了しました。
+
+  core: 0.1.2
+  app : 0.1.2
+```
+
+The two can differ — `git pull` updates core, `setup.sh` updates the UI — so they are
+reported separately. The running core version is also available from the API:
+
+```bash
+curl -s http://127.0.0.1:27800/health
+```
+
+`agent_version` is the version currently running. `installed_agent_version` is the
+version that first created your `workspaces/`, kept as a record.
+
+There is no automatic update and no update check. Nothing contacts a server unless you
+run `setup.sh` yourself.
+
+---
+
 ### Docker setup (optional — distributed execution only)
 
 **You do not need this for normal use.** It exists for running jobs on a separate

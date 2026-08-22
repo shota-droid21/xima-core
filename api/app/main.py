@@ -20,11 +20,16 @@ from .native_files import create_native_files_router, native_file_serving_enable
 from .trash import create_trash_router
 from .validate import create_validate_router
 from .utils.identity import ensure_identity
+from .utils.version import read_core_version
 from .workspace import create_workspace_router
 
 # OpenAPI のタイトル（/docs に表示される）。ワイヤ契約ではないので対外名に合わせる。
 # health レスポンスの "agent" フィールドは契約なので下記のとおり据え置く。
-app = FastAPI(title="xima-core", version="0.1.0")
+#
+# version は core/VERSION から読む。ハードコードしていた頃は発行しても値が
+# 変わらず、/health が古い版を返し続けていた（#174）。
+CORE_VERSION = read_core_version()
+app = FastAPI(title="xima-core", version=CORE_VERSION)
 
 # local モードは CORS を app オリジン限定（既定は同一オリジンのみ）。
 # open / external は従来どおり無制限（既存挙動を保つ）。
@@ -70,16 +75,21 @@ def health() -> dict:
 
     cfg = config_manager.get_config()
     ws_root = cfg.workspaces_root
-    identity = ensure_identity(ws_root, agent_version=str(app.version))
+    identity = ensure_identity(ws_root, agent_version=CORE_VERSION)
 
     return {
         "status": "ok",
         "auth_mode": auth_mode,
         "install_id": identity.install_id,
         "container_id": identity.container_id,
-        "agent_version": identity.agent_version,
+        # **実行中の**版を返す。以前は identity.agent_version を返していたが、
+        # あれは workspaces を作った時点の記録であり、`ensure_identity` は既存が
+        # あればそのまま返すため、更新しても永久に初回の値のままだった（#174）。
+        "agent_version": CORE_VERSION,
         # Backward compatibility（ワイヤ契約。app が読むため改称しない・docs/13 参照）
-        "version": identity.agent_version,
+        "version": CORE_VERSION,
+        # workspaces を作成した版の記録。実行中の版とは別物なので分けて返す。
+        "installed_agent_version": identity.agent_version,
         "agent": "xima-agent",
     }
 
