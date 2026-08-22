@@ -151,8 +151,14 @@ else
   info "pip を更新中…"
   "$VPY" -m pip install --upgrade --quiet --disable-pip-version-check pip
   for f in "${REQ_FILES[@]}"; do
-    info "install: $(basename "$f")（torch を含む場合は数分かかります）"
-    "$VPY" -m pip install --quiet --disable-pip-version-check --prefer-binary -r "$f"
+    info "install: $(basename "$f")"
+    if [ "$(basename "$f")" = "requirements.jobs.txt" ]; then
+      info "torch / CLIP を含みます。ダウンロードは数百 MB、venv は 700 MB 前後になり、回線により数分かかります"
+    fi
+    # --quiet を付けない。付けると pip の進捗が完全に消え、torch の取得中は数分間
+    # 無出力になる。実際には進んでいても停止と区別できず、中断されれば結果は
+    # 「手順が通らない」と同じになる（#167）。
+    "$VPY" -m pip install --disable-pip-version-check --prefer-binary -r "$f"
   done
   echo "$CURRENT_HASH" > "$HASH_FILE"
 fi
