@@ -1,132 +1,80 @@
 # xima-core
 
-**xima-core** is the local-first core of the xima ecosystem.  
-It provides labeling, dataset preparation, and training pipelines behind a local
-HTTP API, and runs on hardware you control.
+**xima-core** は、画像のラベリング・データセット作成・学習を、**手元のマシンだけで**
+実行するためのローカル ML エンジンです。すべての機能をローカル HTTP API 越しに提供します。
 
-This repository contains the **core engine** (API + ML pipelines), released under
-Apache-2.0. The graphical UI is a separate, proprietary bundle that is fetched at
-setup time — it is **not part of this repository**. Everything here works without
-it via the HTTP API and CLI.
+このリポジトリには**エンジン本体（API + ML パイプライン）**が入っており、Apache-2.0 で
+公開しています。グラフィカル UI は**別配布のバンドル**で、セットアップ時に取得されます
+（このリポジトリには含まれません）。**UI が無くても、HTTP API と CLI だけで同じことが
+できます。**
 
-There is no account, no API key, and no telemetry. In the default configuration
-the API binds to `127.0.0.1`, and every input and output is a file under
-`workspaces/`.
+アカウントも API キーもテレメトリもありません。既定の構成では API は `127.0.0.1` に
+バインドし、入力も出力もすべて `workspaces/` 配下のファイルです。
 
-The one outbound request the engine makes is a **one-time download of the CLIP
-weights** on the first training or inference run (cached under `~/.cache/clip`).
-If the machine has no network access, fetch the weights separately and place them
-in that cache.
+エンジンが行う唯一の外向き通信は、**初回の学習または推論のときに一度だけ実行される
+CLIP 重みのダウンロード**です（`~/.cache/clip` にキャッシュされます）。ネットワークに
+出られないマシンで使う場合は、重みを別途取得してこのキャッシュに置いてください。
 
----
-
-## What xima-core is
-
-- A **local ML engine** for image labeling and training
-- Runs on your own machine (CPU / GPU)
-- Exposes a local HTTP API (FastAPI)
-- Uses the **filesystem as the source of truth**
-- Can be used via **API / CLI only** (no UI required)
-
-xima-core is designed for:
-
-- ML engineers
-- individual developers
-- hobbyists running experiments locally
+> English: see [README.en.md](README.en.md).
 
 ---
 
-## What xima-core is NOT
+## できること
 
-- A hosted or managed training platform
-- A no-code ML tool
-- A dataset marketplace or model registry
+- 画像のラベリングと、**類似画像のクラスタリング**（ラベルが 1 枚も無い状態から使えます）
+- ラベルからの**学習用データセット生成**
+- **CLIP の埋め込みに線形分類器を載せた学習**と、検証精度の確認
+- 未ラベル画像への**一括推論**（クラスごとのスコアを JSON で書き出します）
+- 自分のマシン（CPU / GPU）で動作
+- **ファイルシステムを正本**とする
+- **API / CLI だけで完結**できる（UI は必須ではありません）
 
-The scope is deliberately narrow: label images, build a dataset, train a linear
-head on CLIP embeddings, run inference. Anything past that is out of scope.
+想定している利用者は、ML エンジニア、個人開発者、手元で実験を回す人です。
 
----
+## できないこと
 
-## Architecture (High Level)
+- ホスト型・マネージドの学習プラットフォームではありません
+- ノーコード ML ツールではありません
+- データセットの取引所でもモデルレジストリでもありません
 
-```
-┌──────────────┐
-│   Your UI    │  (optional)
-└──────┬───────┘
-       │ HTTP (localhost)
-┌──────▼───────┐
-│  xima-core  │  FastAPI + pipeline scripts
-│              │
-│  - workspace │
-│  - experiment│
-│  - labels    │
-│  - dataset   │
-│  - models    │
-│  - cache     │
-└──────┬───────┘
-       │
-       ▼
- Local filesystem (source of truth)
-```
+**スコープは意図的に狭くしてあります。** 画像にラベルを付け、データセットを作り、CLIP の
+埋め込みに線形ヘッドを学習させ、推論する。ここから先は対象外です。
 
 ---
 
-## Directory Structure (Conceptual)
+## 使い方の流れ
 
-```
-workspaces/
-└─ <workspace_name>/            # user-defined, user-owned asset
-   ├─ source_images/            # original images (canonical; only purge job deletes flagged files)
-   │  └─ ... (user-defined subdirs)
-   └─ experiments/
-      └─ <experiment_name>/     # user-defined
-         ├─ label_input/
-         │  ├─ labels.json
-         │  ├─ label_schema.json
-         │  └─ history/
-         ├─ dataset/            # generated (train/val)
-         ├─ models/             # generated (.pt, etc.)
-         └─ cache/              # generated (thumbnails, etc.)
-```
+1. **まとめてラベルを付ける** — 似た画像どうしが自動でまとまるので、1 枚ずつではなく
+   クラスタごとに付けられます。ラベルが 1 枚も無い状態から始められます
+2. **学習して精度を見る** — 付けたラベルで分類モデルを学習します。CLIP の埋め込みに
+   線形分類器を載せる方式で、検証精度が確認できます
+3. **残りをまとめて推論する** — 学習したモデルで未ラベル画像を推論し、クラスごとの
+   スコアを `experiments/<name>/eval/scores_<run>.json` に書き出します
 
-### Workspace as User-Owned Asset
-
-- `workspaces/` is the canonical source of truth
-- The engine is replaceable; your data is not tied to any runtime
-- Copying `workspaces/` enables full recovery on a new machine
-- In the optional Docker setup, `workspaces/` is mounted as a volume by design
-
-**Note on `source_images`:**
-
-- Users may add or delete files
-- Moving already-labeled files is prohibited
-- Re-run `make_label_list` after additions or deletions
-- If you run `purge_deleted_images`, follow with `make_label_list` (then `apply_label`) to sync labels/dataset
+いずれの段階でも、生成物はすべて `workspaces/` 配下のファイルとして残ります。
 
 ---
 
-## Getting Started (Quick Start)
+## はじめる
 
-### Requirements
+### 必要なもの
 
-**Single machine (default): Docker is not required.**
+**1 台で使う場合、Docker は不要です。**
 
-- Python 3.12+ and a virtualenv (`core/.venv`)
-- Jobs (training / inference / embedding) run **in-process** inside the API,
-  so no broker (redis) and no separate worker process are needed.
+- Python 3.12 以上と virtualenv（`core/.venv`）
+- ジョブ（学習 / 推論 / 埋め込み）は **API プロセス内で実行される**ため、ブローカー（redis）も
+  別プロセスのワーカーも必要ありません
 
-Optional — only for distributed execution (GPU worker / multiple machines):
+任意 — 分散実行（GPU ワーカー / 複数マシン）を行う場合のみ:
 
-- Docker + Docker Compose
-- (Optional) NVIDIA GPU + Docker GPU support
-- Set `XIMA_JOB_BACKEND=celery` and `XIMA_CELERY_BROKER_URL`
+- Docker と Docker Compose
+- （任意）NVIDIA GPU と Docker の GPU サポート
+- `XIMA_JOB_BACKEND=celery` と `XIMA_CELERY_BROKER_URL` の設定
 
-> Note: stopping the API also stops any running job. On the next start those jobs
-> are recorded as `error` (see Decision 036).
+> **API を止めると、実行中のジョブも止まります。** 次回起動時、それらのジョブは `error` として
+> 記録されます。
 
----
-
-### Install and run (recommended)
+### インストールと起動
 
 ```bash
 git clone https://github.com/shota-droid21/xima-core.git
@@ -135,46 +83,58 @@ cd xima-core
 ./scripts/run-local.sh
 ```
 
-Then open <http://127.0.0.1:27800> in your browser.
+ブラウザで <http://127.0.0.1:27800> を開いてください。
 
-`setup.sh` creates `core/.venv`, installs dependencies, fetches the prebuilt UI, and
-initialises `workspaces/` and `state/`. It is **idempotent** — re-running it skips
-anything that has not changed, and it never writes into `workspaces/`.
+`setup.sh` は `core/.venv` を作り、依存をインストールし、ビルド済み UI を取得し、
+`workspaces/` と `state/` を初期化します。**冪等**です — 再実行しても変わっていないものは
+スキップされ、`workspaces/` には一切書き込みません。
 
-| Option | Effect |
+| オプション | 効果 |
 | --- | --- |
-| `--no-ui` | API / CLI only. No UI is fetched or built. |
-| `--no-ml` | Skip torch / CLIP. Training and inference are unavailable. |
-| `--help` | Show usage. |
+| `--no-ui` | API / CLI のみ。UI を取得もビルドもしません |
+| `--no-ml` | torch / CLIP を入れません。学習と推論は使えなくなります |
+| `--help` | 使い方を表示します |
 
-Relevant environment variables:
+関係する環境変数:
 
-| Variable | Purpose |
+| 変数 | 用途 |
 | --- | --- |
-| `XIMA_PYTHON` | Use a specific `python3` |
-| `XIMA_APP_DIST_URL` | Fetch the UI bundle from an explicit URL |
-| `XIMA_WORKSPACES_ROOT` | Where workspaces live (default `core/workspaces`) |
-| `XIMA_PORT` | API port (default `27800`) |
+| `XIMA_PYTHON` | 使用する `python3` を指定 |
+| `XIMA_APP_DIST_URL` | UI バンドルの取得元 URL を明示 |
+| `XIMA_WORKSPACES_ROOT` | workspaces の置き場所（既定 `core/workspaces`） |
+| `XIMA_PORT` | API のポート（既定 `27800`） |
 
-> The UI is distributed as a prebuilt bundle and is **not** part of this
-> Apache-2.0 repository. Use `--no-ui` if you only need the API / CLI.
+> UI はビルド済みバンドルとして配布され、**この Apache-2.0 リポジトリには含まれません**。
+> API / CLI だけが必要なら `--no-ui` を使ってください。
 
----
+### デモデータで試す
 
-### Updating
-
-xima does **not** update itself. Two parts ship separately, so updating takes two steps:
+自分の画像を用意しなくても、ラベリングと学習を試せます。UI の
+**「Create demo workspace」**ボタンを押すか、API を直接呼んでください。
 
 ```bash
-git pull                # core (this repository)
-./scripts/setup.sh      # UI bundle — re-fetches the latest release
+curl -X POST http://127.0.0.1:27800/demo
 ```
 
-`setup.sh` always re-fetches the UI bundle, so re-running it is how you pick up UI fixes.
-Python dependencies are skipped when `requirements` have not changed, and `workspaces/`
-is never touched.
+36 枚のサンプル画像（`circle` / `square` / `triangle` を 12 枚ずつ）と、対応するラベル
+スキーマを持つワークスペース / 実験が作られ、すぐラベリングを始められる状態になります。
 
-**Checking what you are running.** `setup.sh` prints both versions when it finishes:
+サンプル画像は**実行時に生成されます（同梱ではありません）**。第三者の素材を含まず、
+リポジトリにバイナリも入らず、シード固定で再現可能です。
+
+### 更新する
+
+**xima は自動更新しません。** 2 つの部品が別々に配布されるため、更新は 2 手順です。
+
+```bash
+git pull                # core（このリポジトリ）
+./scripts/setup.sh      # UI バンドル（最新リリースを取り直します）
+```
+
+`setup.sh` は毎回 UI バンドルを取り直すので、UI の修正はこれで反映されます。Python の依存は
+`requirements` が変わっていなければスキップされ、`workspaces/` には触れません。
+
+**いま動いている版を確認する。** `setup.sh` は終了時に両方の版を表示します。
 
 ```
 セットアップが完了しました。
@@ -183,128 +143,170 @@ is never touched.
   app : 0.1.2
 ```
 
-The two can differ — `git pull` updates core, `setup.sh` updates the UI — so they are
-reported separately. The running core version is also available from the API:
+`git pull` が core を、`setup.sh` が UI を更新するため、両者は食い違うことがあります。
+だから別々に表示しています。動作中の core の版は API からも取得できます。
 
 ```bash
 curl -s http://127.0.0.1:27800/health
 ```
 
-`agent_version` is the version currently running. `installed_agent_version` is the
-version that first created your `workspaces/`, kept as a record.
+`agent_version` が現在動いている版、`installed_agent_version` は `workspaces/` を最初に
+作った版の記録です。
 
-There is no automatic update and no update check. Nothing contacts a server unless you
-run `setup.sh` yourself.
+**自動更新も更新チェックもありません。** `setup.sh` を自分で実行しない限り、
+サーバと通信することはありません。
 
 ---
 
-### Docker setup (optional — distributed execution only)
+## 使い方
 
-**You do not need this for normal use.** It exists for running jobs on a separate
-GPU worker or across machines (`XIMA_JOB_BACKEND=celery`). Interactive launcher:
+xima-core の使い方は 3 通りあります。
+
+1. **HTTP API**（推奨）— [API.md](API.md) に全経路をまとめてあります
+2. **CLI / スクリプト**
+3. **自作の UI や自動化**
+
+公式の xima UI も、同じローカル API 越しに xima-core と通信しています。**UI に特権的な
+経路はありません**。したがって UI にできることは、すべてスクリプトから実行できます。
+
+---
+
+## ワークスペースの構成
+
+```
+workspaces/
+└─ <workspace_name>/            # 利用者が決める、利用者の資産
+   ├─ source_images/            # 元画像（正本。purge ジョブのみが対象ファイルを削除する）
+   │  └─ ... （任意のサブディレクトリ）
+   └─ experiments/
+      └─ <experiment_name>/     # 利用者が決める
+         ├─ label_input/
+         │  ├─ labels.json
+         │  ├─ label_schema.json
+         │  └─ history/
+         ├─ dataset/            # 生成物（train / val）
+         ├─ models/             # 生成物（.pt など）
+         ├─ eval/               # 生成物（推論スコアなど）
+         └─ cache/              # 生成物（サムネイルなど）
+```
+
+### 利用者の資産としての `workspaces/`
+
+- `workspaces/` が正本です
+- **エンジンは差し替え可能で、データは特定のランタイムに縛られません**
+- `workspaces/` をコピーすれば、別のマシンで完全に復元できます
+- 任意の Docker 構成では、`workspaces/` はボリュームとしてマウントされます
+
+### `source_images` の扱い
+
+- ファイルの追加・削除は自由です
+- **すでにラベルが付いたファイルの移動は禁止**です
+- 追加・削除のあとは `make_label_list` を実行し直してください
+- `purge_deleted_images` を実行した場合は、続けて `make_label_list`（その後 `apply_label`）を
+  実行して、ラベルとデータセットを同期させてください
+
+---
+
+## 用語
+
+| 語 | 意味 |
+| --- | --- |
+| **workspace** | 画像とその実験一式を収める単位。利用者の資産であり、正本 |
+| **experiment** | 1 つの workspace の中で、ラベル体系・データセット・モデルを分離する単位 |
+| **`labels.json`** | ラベルの正本。`label_input/` に置かれ、履歴は `history/` に残る |
+| **dataset と cache** | `dataset/` は学習に使う生成物、`cache/` はサムネイル等の再生成可能な派生物。どちらも消しても作り直せる |
+| **ファイルシステムが正本** | DB を持たない。状態はすべてファイルとして存在し、外から読める |
+
+---
+
+## 認証モード
+
+`xima-core` には 3 つの認証モードがあり、`XIMA_AGENT_AUTH_MODE` で選択します。
+
+| モード | 用途 | 仕組み |
+| --- | --- | --- |
+| `local` **（既定）** | 1 人でのデスクトップ利用 | ループバックのみにバインドし、CORS を自身のオリジンに限定し、起動ごとの秘密ヘッダ（`X-Xima-Local-Key`）を要求します。秘密は `state/.local_secret`（モード 0600）に保存され、同一オリジンの `/local/session` 経由で UI に渡されます |
+| `open` | 開発 / CI | 認証なし。信頼できる環境でのみ使ってください |
+| `external` | 将来のコントロールプレーン用に予約 | 外部発行者に対する JWT 検証。**現在は休止中** — 将来のマネージャがトークン発行者になれるよう、書き直しを避けるために残してあります |
+
+`scripts/run-local.sh` は `local` モードで起動します。通常この変数を設定する必要はありません。
+
+```bash
+# 開発 / CI（認証なし）
+XIMA_AGENT_AUTH_MODE=open ./scripts/run-local.sh
+```
+
+`local` モードが守るのは**ひとつの脅威だけ**です。ブラウザで開いている web ページが、
+クロスオリジンであなたの `localhost` API に到達すること。**同じ OS ユーザで動いている別の
+プロセスは防げません** — それには OS レベルのサンドボックスが必要です。
+
+### `external` モード（休止中）
+
+将来のコントロールプレーンのために残してあります。**現在の xima-core に発行者は同梱されて
+いません。** 有効化した場合、nginx が `/_auth` に対して `auth_request` を行い、Redis の
+ホワイトリストキャッシュが利用できます。
+
+- `XIMA_AGENT_AUTH_WHITELIST_ENABLED`（既定 `1`）
+- `XIMA_AGENT_AUTH_WHITELIST_TTL_SECONDS`（既定 `300`）
+- `XIMA_AGENT_AUTH_WHITELIST_REDIS_URL`（既定 `redis://redis:6379/1`）
+- `XIMA_AGENT_AUTH_WHITELIST_KEY_PREFIX`（既定 `xima:auth:whitelist:v1`）
+
+---
+
+## GPU
+
+xima-core は GPU 実行に対応しています。
+
+**NVIDIA GPU（Docker プロファイル）**
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu-nvidia.yml up -d --build
+```
+
+**Apple Silicon（Metal / PyTorch MPS）**
+
+- `redis` / `nginx` は Metal プロファイルの compose overlay を使います
+  - `docker compose -f docker-compose.yml -f docker-compose.gpu-metal.yml up -d --build`
+- API / worker は `xima-core/.venv` からネイティブに実行します
+  （`gpu-metal` プロファイルの `./scripts/agent-launcher.sh` が管理します）
+- `xima-core/.venv` が無い場合や依存が足りない場合、launcher が venv を作り
+  `api/requirements.base.txt` と `api/requirements.jobs.txt` を導入します
+- `train_epoch` / `infer_heads` のジョブの `device` に `metal`（または `mps`）を指定します
+- `auto` は `cuda -> mps -> cpu` の順で解決されます
+
+---
+
+## 分散実行（任意・Docker）
+
+**通常の利用では不要です。** ジョブを別の GPU ワーカーや複数マシンで実行する場合
+（`XIMA_JOB_BACKEND=celery`）にだけ使います。
+
+対話型の launcher:
 
 ```bash
 ./scripts/agent-launcher.sh
 ```
 
-Operation menu:
+メニューは `start` / `stop` / `restart` / `rebuild` / `log` / `health` です。実行時の設定は
+`xima-core/.launcher-config.env` に保存されます。
 
-- `start`
-- `stop`
-- `restart`
-- `rebuild`
-- `log`
-- `health`
+- 設定ファイルが無ければ、launcher が既定値で作成します
+- `start` / `restart` は保存済み設定で起動します（`up -d --no-recreate`。既存コンテナを保持）
+- `stop` は `docker compose stop`（コンテナは削除されません）
+- `rebuild` は実行時オプションを聞き直し、設定を上書きしてから `--build` で起動します
+- `start` / `restart` / `rebuild` は起動後にヘルスチェック（`:27800/health`、`:27801/health`）を行います
 
-Runtime settings are persisted in `xima-core/.launcher-config.env`.
-
-- If the config file does not exist, launcher creates it with defaults.
-- `start` / `stop` / `restart` / `log` / `health` read the saved config.
-- `rebuild` does not read the config first; it asks runtime options again, then overwrites `xima-core/.launcher-config.env` with the new values.
-- `stop` uses `docker compose stop` (containers are kept; not removed).
-- `start` uses saved config and starts with `up -d --no-recreate` (keeps existing containers).
-- `restart` does not re-prompt runtime options; it performs stop then start with saved config.
-- `rebuild` re-prompts runtime options and starts with Docker `--build`.
-- `start` / `restart` / `rebuild` run health checks (`:27800/health`, `:27801/health`) after boot.
-
-Manual start command:
+手動で起動する場合:
 
 ```bash
 docker compose up -d --build
 ```
 
-### Try It with Demo Data (optional)
-
-To try labeling and training without preparing your own images, use the
-**"Create demo workspace"** button in the UI, or call the API directly:
-
-```bash
-curl -X POST http://127.0.0.1:27800/demo
-```
-
-(The Docker launcher also offers this as menu item `7) demo`.)
-
-This creates a workspace/experiment with 36 generated sample images
-(`circle` / `square` / `triangle`, 12 each), a matching label schema,
-and imports them so you can start labeling right away.
-The UI also offers a "Create demo workspace" button when no workspace exists.
-
-Sample images are **generated at runtime, not bundled** — no third-party assets,
-no binary blobs in the repository, and reproducible (fixed seed).
-
 ---
 
-### Authentication Mode
+## 開発者向けテスト
 
-`xima-core` has three authentication modes, selected with `XIMA_AGENT_AUTH_MODE`.
-
-| Mode | Purpose | How it works |
-| --- | --- | --- |
-| `local` **(default)** | Single-user desktop use | Binds to loopback only, restricts CORS to its own origin, and requires a per-start secret header (`X-Xima-Local-Key`). The secret is stored in `state/.local_secret` (mode 0600) and handed to the UI same-origin via `/local/session`. |
-| `open` | Development / CI | No authentication. Trusted environments only. |
-| `external` | Reserved for a future control plane | JWT validation against an external issuer. **Currently dormant** — kept so that a future manager can become the token issuer without a rewrite. |
-
-`scripts/run-local.sh` starts in `local` mode. You normally do not need to set
-this variable.
-
-```bash
-# Development / CI, no auth
-XIMA_AGENT_AUTH_MODE=open ./scripts/run-local.sh
-```
-
-`local` mode protects against one specific threat: a web page in your browser
-reaching your `localhost` API cross-origin. It cannot protect against another
-process running as the same OS user — that would require OS-level sandboxing.
-
-#### External mode (dormant)
-
-Kept for a future control plane; there is no issuer shipped with xima-core today.
-When enabled, nginx uses `auth_request` against `/_auth`, and a Redis whitelist
-cache is available:
-
-- `XIMA_AGENT_AUTH_WHITELIST_ENABLED` (default: `1`)
-- `XIMA_AGENT_AUTH_WHITELIST_TTL_SECONDS` (default: `300`)
-- `XIMA_AGENT_AUTH_WHITELIST_REDIS_URL` (default: `redis://redis:6379/1`)
-- `XIMA_AGENT_AUTH_WHITELIST_KEY_PREFIX` (default: `xima:auth:whitelist:v1`)
-
----
-
-## Usage
-
-xima-core can be used in three ways:
-
-1. **HTTP API** (recommended)
-2. **CLI / scripts**
-3. **Custom UI or automation**
-
-The official xima UI communicates with xima-core over this same local API —
-it has no privileged access, so anything the UI can do is scriptable.
-
----
-
-## Developer Tests (Canonical Head Types)
-
-For local pipeline contract checks, use a project-local venv:
+パイプラインの契約を手元で確認する場合は、プロジェクト内の venv を使ってください。
 
 ```bash
 python3 -m venv .venv
@@ -312,87 +314,43 @@ python3 -m venv .venv
 .venv/bin/pytest -q api/app/test_label_input_contract.py api/pipeline/test_pipeline_minimal_e2e.py
 ```
 
-These tests validate:
+検証される内容:
 
-- `PUT /label-input` schema-based normalization/validation
-- minimal pipeline flow (`apply_label_mapping -> train_epoch -> infer_heads`)
-- `single_class` compatibility and `multi_label` contract handling
-
----
-
-## Core Concepts
-
-Before using xima-core, it is recommended to understand:
-
-- Workspace
-- Experiment
-- labels.json
-- dataset vs cache
-- filesystem as truth
-
-See:
-
-- `docs/00_overview.md`
-- `docs/01_concepts.md`
-- `docs/90_decisions.md`
+- `PUT /label-input` のスキーマに基づく正規化・検証
+- 最小のパイプライン（`apply_label_mapping -> train_epoch -> infer_heads`）
+- `single_class` の互換性と `multi_label` の契約
 
 ---
 
-## GPU Support
+## 状態とサポート
 
-xima-core supports GPU execution.
+- xima-core は **現状のまま（as-is）**提供されます
+- core の API とパイプラインは安定しています
+- 内部の実装詳細は変わることがあります
+- 後方互換性はベストエフォートです
 
-For NVIDIA GPU (Docker profile):
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.gpu-nvidia.yml up -d --build
-```
-
-For Apple Silicon (Metal / PyTorch MPS):
-
-- Use Metal profile compose overlay for `redis/nginx`:
-  - `docker compose -f docker-compose.yml -f docker-compose.gpu-metal.yml up -d --build`
-- Run API/worker natively from `xima-core/.venv` (managed by `./scripts/agent-launcher.sh` in `gpu-metal` profile).
-- If `xima-core/.venv` is missing (or dependencies are missing), launcher auto-creates the venv and installs `api/requirements.base.txt` + `api/requirements.jobs.txt`.
-- Set job `device` to `metal` (or `mps`) for `train_epoch` / `infer_heads`.
-- `auto` now resolves in order: `cuda -> mps -> cpu`.
+**質問・不具合報告・要望は [GitHub Discussions](https://github.com/shota-droid21/xima-core/discussions) へどうぞ。**
+このリポジトリの Issues は使っていません。
 
 ---
 
-## Stability & Support
+## ライセンス
 
-- xima-core is provided **as-is**
-- The core APIs and pipelines are stable
-- Internal implementation details may change
-- Backward compatibility is best-effort
-
-For issues and discussions:
-
-- GitHub Issues (recommended)
+`xima-core` は **Apache License 2.0** です。全文は [`LICENSE`](LICENSE)、帰属表示と
+第三者ライセンスの告知は [`NOTICE`](NOTICE) を参照してください。
 
 ---
 
-## License
+## xima 本体との関係
 
-`xima-core` is licensed under the **Apache License 2.0**. See [`LICENSE`](LICENSE)
-for the full terms and [`NOTICE`](NOTICE) for attribution and third-party notices.
+xima は**ローカルファーストのデスクトップ製品**です。サーバコンポーネントもアカウントも
+なく、すべてが自分のマシンで動きます。
 
----
-
-## Relationship to xima
-
-xima is a **local-first desktop product**. There is no server component and no
-account: everything runs on your machine.
-
-| Part | License | Where it lives |
+| 部品 | ライセンス | 所在 |
 | --- | --- | --- |
-| **xima-core** (this repository) — API, ML pipelines, workspaces | Apache-2.0 | Public |
-| **xima app** — the graphical UI | Proprietary | Prebuilt bundle fetched by `setup.sh` |
+| **xima-core**（このリポジトリ）— API・ML パイプライン・workspaces | Apache-2.0 | 公開 |
+| **xima app** — グラフィカル UI | プロプライエタリ | `setup.sh` が取得するビルド済みバンドル |
 
-The app talks to xima-core over the same local HTTP API documented here — it has no
-privileged access. **xima-core is fully usable on its own**, via the API or the CLI,
-and every core capability is available without the UI.
-
-Paid ("Plus") capabilities, if and when they exist, are unlocked by a signed
-entitlement verified locally. They add automation on top of the loop; they do not
-gate the core pipeline.
+app は、ここに書かれているのと同じローカル HTTP API 越しに xima-core と通信します。
+**特権的な経路はありません。** xima-core は単体で完全に使え、UI が無くても core の機能は
+すべて利用できます。

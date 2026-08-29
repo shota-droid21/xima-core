@@ -5,7 +5,7 @@
 ベース URL: `http://{host}:{port}`（`scripts/run-local.sh` の既定は `127.0.0.1:27800`。任意の docker-compose 構成では `127.0.0.1:27801`）
 
 認証: 既定の `local` モードでは、`/health` と `/local/session` を除くすべての経路に
-`X-Xima-Local-Key` ヘッダが必要です（`README.md` の Authentication Mode を参照）。
+`X-Xima-Local-Key` ヘッダが必要です（`README.md` の「認証モード」を参照）。
 以下の例は簡潔さのためヘッダを省略しています。`XIMA_AGENT_AUTH_MODE=open` ではヘッダ不要です。
 
 共通のパス規約:
@@ -382,4 +382,4 @@ curl http://127.0.0.1:27801/workspaces/ws_test/experiments/exp1/jobs/<JOB_ID>/lo
 
 ---
 
-このファイルは `agent/README.md` の API 参照セクションと対応しています。README からこちらのファイルへのリンクを追加済みです。
+HTTP API の全経路は本ファイルにまとめてあります。導入と運用は [README.md](README.md) を参照してください。
