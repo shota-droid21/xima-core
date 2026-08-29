@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -100,3 +101,55 @@ def test_write_json_atomic_roundtrip(tmp_path: Path) -> None:
     assert json.loads(target.read_text(encoding="utf-8")) == payload
     # ensure_ascii=False が既定。日本語がエスケープされないこと。
     assert "日本語" in target.read_text(encoding="utf-8")
+
+
+def test_concurrent_reader_never_sees_a_torn_file(tmp_path: Path) -> None:
+    """書き込み中に読んでも、壊れた JSON は決して観測されない（#197）。
+
+    ジョブ状態ファイルは「書き手が進捗のたびに上書きし、読み手がポーリングする」形で
+    使われる。`Path.write_text()` は truncate してから書くため、この使い方では
+    読み手が切り詰められた JSON を掴む。実測で同時読み出しの約 1.4% が壊れ、
+    xima-core の CI が 3 週間 red になっていた。
+
+    ここで固定したいのは helper の中身ではなく **「並行して読んでも壊れない」** という
+    性質そのものである。write_text に戻せばこのテストが落ちる。
+    """
+    import threading
+
+    target = tmp_path / "job.json"
+    payload = {
+        "id": "a" * 32,
+        "status": "running",
+        "progress": {"percent": 50, "message": "extracting backup archive"},
+        # 1 回の write が一瞬で終わらない程度の大きさにする。小さすぎると
+        # 壊れた実装でも窓が閉じてしまい、回帰を検出できない。
+        "pad": [f"item-{i}" for i in range(400)],
+    }
+    write_json_atomic(target, payload)
+
+    stop = threading.Event()
+    torn: list[str] = []
+    reads = [0]
+
+    def writer() -> None:
+        while not stop.is_set():
+            write_json_atomic(target, payload)
+
+    def reader() -> None:
+        while not stop.is_set():
+            try:
+                json.loads(target.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, FileNotFoundError) as exc:
+                torn.append(f"{type(exc).__name__}: {exc}")
+            reads[0] += 1
+
+    threads = [threading.Thread(target=writer), threading.Thread(target=reader)]
+    for t in threads:
+        t.start()
+    time.sleep(1.0)
+    stop.set()
+    for t in threads:
+        t.join()
+
+    assert reads[0] > 500, f"読み出し回数が少なすぎて検出力が無い: {reads[0]}"
+    assert torn == [], f"{len(torn)} 件の壊れた読み出し（{reads[0]} 回中）: {torn[:3]}"

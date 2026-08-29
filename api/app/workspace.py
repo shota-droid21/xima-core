@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 from .config import ConfigManager
+from .utils.atomic_io import write_json_atomic
 from .utils.identity import ensure_identity
 from .utils.meta import ExperimentMeta, WorkspaceMeta
 from .utils.paths import is_subpath, require_dir
@@ -88,7 +89,7 @@ def _mark_interrupted_workspace_jobs(job_dir: Path) -> None:
                 "interrupted by restart; temporary backup/restore files were cleaned up"
             )
         try:
-            p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            write_json_atomic(p, payload)
         except Exception:
             continue
 
@@ -115,7 +116,7 @@ def _trash_move(src, dest) -> None:
 
 
 def _write_json(path, data: dict) -> None:
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json_atomic(path, data)
 
 
 def _dir_size_bytes(root: Path) -> int:
@@ -424,12 +425,14 @@ def create_workspace_router(config_manager: ConfigManager) -> APIRouter:
         return p
 
     def _save_workspace_backup_job(job: dict[str, Any]) -> None:
+        # ジョブ実行中は進捗のたびにこのファイルを上書きする一方、状態エンドポイントは
+        # ポーリングされる前提で設計されている。非アトミックに書くと、読み手が
+        # 切り詰められた JSON を掴んで 500 を返す（#197）。
         job_id = str(job.get("id") or "").strip().lower()
         if not _WORKSPACE_BACKUP_JOB_ID_RE.match(job_id):
             raise ValueError("invalid backup job id")
         path = _workspace_backup_job_path(job_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_json_atomic(path, job)
 
     def _load_workspace_backup_job(job_id: str) -> dict[str, Any]:
         path = _workspace_backup_job_path(job_id)
@@ -579,10 +582,11 @@ def create_workspace_router(config_manager: ConfigManager) -> APIRouter:
         return p
 
     def _save_workspace_restore_job(job: dict[str, Any]) -> None:
+        # backup 側と同じ理由でアトミックに書く（#197）。復元はユーザ資産の回復経路であり、
+        # 進行中に理由のない 500 を返すと、利用者は失敗したと解釈しうる。
         job_id = str(job.get("id") or "").strip().lower()
         path = _workspace_restore_job_path(job_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_json_atomic(path, job)
 
     def _load_workspace_restore_job(job_id: str) -> dict[str, Any]:
         path = _workspace_restore_job_path(job_id)

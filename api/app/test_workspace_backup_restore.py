@@ -310,3 +310,76 @@ def test_workspace_backup_download_returns_410_when_artifact_missing(tmp_path: P
     dl_res = client.get(f"/workspaces/{workspace}/backup-jobs/{job_id}/download")
     assert dl_res.status_code == 410
     assert "expired" in str(dl_res.json().get("detail", "")).lower()
+
+
+@pytest.mark.skipif(
+    not _has_backup_toolchain(),
+    reason="workspace backup/restore tests require tar and zstd",
+)
+def test_restore_job_file_is_replaced_not_truncated(tmp_path: Path) -> None:
+    """ジョブ状態ファイルは truncate ではなく置き換えで更新される（#197）。
+
+    このファイルは「書き手が進捗のたびに上書きし、読み手がステータス取得で
+    ポーリングする」形で使われる。`Path.write_text()` は truncate してから書くため、
+    読み手が切り詰められた JSON を掴んで 500 になる。実際にこれで xima-core の
+    CI が 3 週間 red のままだった。
+
+    タイミングに依存せず判定するために、**inode を見る**。`os.replace` で差し替えて
+    いれば書き込みのたびに inode が変わり、truncate して書いていれば変わらない。
+    壊れた読み出しを待ち構える形にすると、速いマシンでは窓が狭すぎて素通りする
+    （実測: 修正前の実装でも 3 回連続で pass した）。
+    """
+    client = _make_client(tmp_path)
+    workspace = "ws51aa09"
+    created = client.post(
+        "/workspaces",
+        json={"display_name": "Restore Race", "id": workspace},
+    )
+    assert created.status_code == 200
+    ws_root = tmp_path / workspace
+
+    source_file = ws_root / "source_images" / "a.txt"
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.write_text("hello", encoding="utf-8")
+
+    backup_res = client.get(f"/workspaces/{workspace}/backup")
+    assert backup_res.status_code == 200
+    archive_bytes = backup_res.content
+
+    shutil.rmtree(ws_root)
+
+    restore_job_res = client.post(
+        "/workspaces/restore-jobs",
+        data=archive_bytes,
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    assert restore_job_res.status_code == 200
+    job_id = restore_job_res.json()["job_id"]
+
+    job_files = list(tmp_path.rglob(f"workspace_restore/{job_id}.json"))
+    assert len(job_files) == 1, f"ジョブ状態ファイルが特定できない: {job_files}"
+    job_file = job_files[0]
+
+    inodes: set[int] = set()
+    statuses: list[str] = []
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        try:
+            inodes.add(job_file.stat().st_ino)
+        except FileNotFoundError:
+            pass
+        res = client.get(f"/workspaces/restore-jobs/{job_id}")
+        assert res.status_code == 200, res.text
+        status = res.json()["status"]
+        statuses.append(status)
+        if status in ("done", "error"):
+            break
+
+    assert statuses and statuses[-1] == "done", statuses[-5:]
+    # queued -> running -> done で最低 2 回は書き換わる。置き換えなら inode も動く。
+    assert len(inodes) >= 2, (
+        f"inode が {len(inodes)} 種類しか観測されなかった。"
+        "ジョブ状態ファイルが truncate 更新に戻っている可能性がある"
+    )
+    assert (ws_root / "workspace.json").exists()
+    assert source_file.read_text(encoding="utf-8") == "hello"
