@@ -106,9 +106,14 @@ def _load_embeddings(cache_root: Path, model_name: str) -> tuple[Dict[str, int],
     index = load_index(dir_path)
     matrix_path = dir_path / "embeddings.npy"
     if index is None or not matrix_path.exists():
+        # **どの CLIP モデルの埋め込みが要るか**まで書く。embed_images の既定は
+        # ViT-B/32 であり、学習に別のモデルを使っていると「embed_images を実行しろ」
+        # だけでは同じエラーに戻ってくる。
         raise SystemExit(
-            f"[ERROR] 埋め込みキャッシュがありません: {dir_path}\n"
-            "        先に embed_images ジョブを実行してください。"
+            f"[ERROR] このモデルに必要な埋め込みキャッシュがありません: {dir_path}\n"
+            f"        学習に使われた CLIP モデルは {model_name} です。\n"
+            f"        先に embed_images を **同じモデルで** 実行してください:\n"
+            f"          --clip-model {model_name}"
         )
     rows = {
         str(e.get("file_id")): int(e.get("row", -1))
