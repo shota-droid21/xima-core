@@ -18,8 +18,8 @@ JOB_TYPES = {
     # Preferred explicit names
     "train_epoch",
     "infer_heads",
-    # 未ラベル画像を推論して labels.json へ書き戻す（T2-2）
-    "predict_unlabeled",
+    # 学習済み head の予測を labels.json に候補として記録する（T2-2）
+    "predict_labels",
 }
 
 
@@ -28,7 +28,7 @@ class JobCreateRequest(BaseModel):
         ...,
         pattern=(
             "^(apply_label|augment_gray|make_label_list|purge_deleted_images|embed_images|"
-            "train|infer_scores|train_epoch|infer_heads|predict_unlabeled)$"
+            "train|infer_scores|train_epoch|infer_heads|predict_labels)$"
         ),
     )
     args: Dict[str, Any] = Field(default_factory=dict)

@@ -516,10 +516,10 @@ class JobsManager:
                     isinstance(raw, str) and re.search(r"(^|\s)--schema(\s|=)", raw)
                 ):
                     args.setdefault("schema", str(schema_path))
-            elif job_type == "predict_unlabeled":
-                # 未ラベル画像への書き戻し（T2-2）。infer_heads と違い入力は
-                # dataset/index.json ではなく labels.json であり、出力は JSON ではなく
-                # labels.json そのものへの書き戻しになる。
+            elif job_type == "predict_labels":
+                # 予測の候補記録（T2-2）。infer_heads と違い入力は dataset/index.json
+                # ではなく labels.json であり、出力も JSON ではなく labels.json の
+                # item["predicted"] への記録になる。labels（確定値）は変えない。
                 args = dict(args or {})
                 exp_dir = cfg.experiments_path_for(ws) / exp
                 models_dir = exp_dir / "models"

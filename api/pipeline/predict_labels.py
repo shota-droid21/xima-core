@@ -1,35 +1,31 @@
-"""学習済み head で **未ラベル画像**を推論し、labels.json へ書き戻す（T2-2・手動 1 回）。
+"""学習済み head で予測を出し、labels.json に **候補として**記録する（T2-2）。
 
-なぜ別スクリプトなのか（`infer_heads.py` を拡張しないのか）:
+ワークフロー上の位置（2 周目以降）:
+
+    make_label_list -> embed_images -> **predict_labels** -> labeling(候補付き) -> apply_label -> train
+
+`labels` には書かない。書くのは `item["predicted"]` だけで、確定は単体画面で人が行う
+（理由は `label_predictions.py` の docstring）。
+
+なぜ `infer_heads.py` を拡張しないのか:
 
     `infer_heads.py` の対象は `dataset/index.json` である。この index は
     `apply_label_mapping.py` が `if deleted or split not in ("train","val"): continue`
     で作るため、**中身は学習に使った item だけ**であり、未ラベル画像は 1 枚も入らない。
-    つまり既存の推論は「学習データに対するスコア」を出すもので、
-    MVP の到達点である「**残りの画像に**ラベルが付いた状態」には届かない。
-
-    未ラベルを対象にするには入力源を index.json から labels.json へ変える必要があり、
-    出力も JSON ではなく labels.json への書き戻しになる。入力も出力も別物なので、
-    動作実績のある `infer_heads.py` に分岐を足さず、別の経路として書く。
+    入力（index.json -> labels.json）も出力（JSON 出力 -> labels.json への記録）も別物なので、
+    動作実績のある `infer_heads.py` に分岐を足さず別経路として書く。
 
 画像を読み直さない:
 
     `embed_images.py` は **labels.json の全 item**（未ラベルを含む）を埋め込んで
     `cache/embeddings/` に置く。head は CLIP 埋め込みの上の Linear なので、
-    キャッシュに head を掛けるだけでよい。CLIP を通し直さないため、
-    1,000 枚規模でも実用的な時間で終わる。
+    キャッシュに head を掛けるだけでよい。したがって **`embed_images` を先に流しておく
+    必要がある**。埋め込みは学習に使ったのと**同じ CLIP モデル**のものが要る。
 
-    したがって **`embed_images` を先に流しておく必要がある**。埋め込みの無い item は
-    書き戻さず、件数として報告する。
+対象は全 item:
 
-安全側の作り（詳細は `label_writeback.py`）:
-
-    - 人が付けたラベルは上書きしない（head 単位で判定）
-    - 予測は `predicted` に由来を残し、`committed` は立てない
-    - `split` に触れないので、書き戻しただけでは dataset に入らない
-      （＝自分の予測で再学習することはない）
-    - 書き戻す前に labels.json のスナップショットを history へ取る。
-      既存の LabelHistory から復元できる（一括変更は必ず戻せるようにする）
+    未分類が主用途だが、class を追加した / 再ラベルする場面では既ラベル画像の候補も要る。
+    `labels` に書かない以上、対象を広げても既存の作業を脅かさない。
 """
 
 from __future__ import annotations
@@ -51,12 +47,11 @@ from embedding_cache import embeddings_dir, load_index  # noqa: E402
 from head_checkpoint import linear_shape, normalize_state_dict  # noqa: E402
 from job_progress import update_job_progress  # noqa: E402
 from label_schema import canonical_head_type, get_heads, load_schema  # noqa: E402
-from label_writeback import (  # noqa: E402
-    DEFAULT_MIN_SCORE,
-    WritebackReport,
-    apply_prediction,
-    commit_writeback,
-    plan_writeback,
+from label_predictions import (  # noqa: E402
+    PredictionReport,
+    plan_predictions,
+    record_prediction,
+    write_json_atomic,
 )
 
 
@@ -125,7 +120,7 @@ def _load_embeddings(cache_root: Path, model_name: str) -> tuple[Dict[str, int],
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="学習済み head で未ラベル画像を推論し labels.json へ書き戻す (agent)"
+        description="学習済み head で予測を出し labels.json に候補として記録する (agent)"
     )
     parser.add_argument("--labels", type=str, required=True, help="labels.json のパス")
     parser.add_argument("--run-dir", type=str, required=True, help="学習済み head の run ディレクトリ")
@@ -133,15 +128,9 @@ def main() -> None:
     parser.add_argument("--schema", type=str, default=None, help="label_schema.json（省略時は labels.json の隣を推定）")
     parser.add_argument("--heads", type=str, default=None, help="対象 head をカンマ区切りで指定")
     parser.add_argument(
-        "--min-score",
-        type=float,
-        default=DEFAULT_MIN_SCORE,
-        help=f"書き戻す下限スコア (既定 {DEFAULT_MIN_SCORE})",
-    )
-    parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="labels.json を書き換えず、何件書き戻すかだけを出す",
+        help="labels.json を書き換えず、何件に候補が付くかだけを出す",
     )
     args = parser.parse_args()
 
@@ -180,11 +169,9 @@ def main() -> None:
     print(f"[INFO] run dir: {run_dir}")
     print(f"[INFO] 埋め込み: {matrix.shape[0]} 行 / clip={clip_name}")
     print(f"[INFO] 対象 head: {[h for h, _, _ in heads]}")
-    print(f"[INFO] 下限スコア: {args.min_score}")
 
-    report = WritebackReport()
     per_head: Dict[str, Dict[str, int]] = {}
-    total_written = 0
+    total_recorded = 0
 
     for hi, (head, head_type, ckpt) in enumerate(heads):
         state = normalize_state_dict(ckpt.get("state_dict") or ckpt.get("head_state") or {})
@@ -195,8 +182,10 @@ def main() -> None:
         num_classes, in_dim = shape
         if in_dim != int(matrix.shape[1]):
             raise SystemExit(
-                f"[ERROR] head '{head}' の入力次元 {in_dim} と埋め込み {matrix.shape[1]} が一致しません。\n"
-                "        学習時と別の CLIP モデルで埋め込んでいる可能性があります。"
+                f"[ERROR] head '{head}' の入力次元 {in_dim} と埋め込み {matrix.shape[1]} が"
+                "一致しません。\n"
+                f"        学習は {clip_name} で行われています。embed_images を"
+                "同じモデルで実行し直してください。"
             )
         classes = [str(c) for c in (ckpt.get("classes") or [])]
         if len(classes) != num_classes:
@@ -207,8 +196,9 @@ def main() -> None:
         model.load_state_dict(state)
         model.eval()
 
-        # 未ラベル item に限って推論する。全件に掛けても捨てるだけなので、対象を先に絞る。
-        head_report = WritebackReport()
+        # **全 item が対象**（削除対象を除く）。class 追加・再ラベルの場面で
+        # 既ラベル画像の候補も要るため。labels に書かないので広げても安全。
+        head_report = PredictionReport()
         candidates = [
             it for it in items
             if isinstance(it, dict) and str(it.get("file_id") or "") in rows_by_file_id
@@ -230,31 +220,27 @@ def main() -> None:
                         classes[c]: float(probs[row_i][c].item()) for c in range(num_classes)
                     }
 
-        planned = plan_writeback(
+        planned = plan_predictions(
             items,
-            head=head,
-            head_type=head_type,
             scores_by_file_id=scores_by_file_id,
-            min_score=float(args.min_score),
+            head_type=head_type,
             report=head_report,
         )
         if not args.dry_run:
             for item, prediction in planned:
-                apply_prediction(item, head=head, prediction=prediction, run_name=run_dir.name)
-        head_report.written = len(planned)
-        total_written += len(planned)
-
+                record_prediction(
+                    item,
+                    head=head,
+                    head_type=head_type,
+                    prediction=prediction,
+                    run_name=run_dir.name,
+                )
+        head_report.recorded = len(planned)
+        total_recorded += len(planned)
         per_head[head] = head_report.as_dict()
-        report.written += head_report.written
-        report.skipped_existing += head_report.skipped_existing
-        report.skipped_low_score += head_report.skipped_low_score
-        report.skipped_deleted += head_report.skipped_deleted
-        report.skipped_no_embedding += head_report.skipped_no_embedding
 
         print(
-            f"[INFO] {head}: 書き戻し {head_report.written} / "
-            f"既にラベルあり {head_report.skipped_existing} / "
-            f"スコア不足 {head_report.skipped_low_score} / "
+            f"[INFO] {head}: 候補 {head_report.recorded} 件 / "
             f"削除対象 {head_report.skipped_deleted} / "
             f"埋め込み無し {head_report.skipped_no_embedding}"
         )
@@ -263,33 +249,25 @@ def main() -> None:
         )
 
     if args.dry_run:
-        print(f"[INFO] dry-run のため labels.json は変更していません（書き戻し予定 {total_written} 件）")
-    elif total_written == 0:
-        # 何も書かないのにスナップショットだけ増やさない。
-        print("[INFO] 書き戻す対象がありませんでした。labels.json は変更していません")
-        if report.skipped_existing and not report.skipped_low_score:
-            # 「動かなかった」と誤解されやすい場面なので、理由を名指しする。
-            # 2 回目以降は前回書き戻した値が「ラベルあり」に数えられるため、
-            # モデルを学習し直しても既定では上書きしない（T2-2 は手動 1 回の範囲）。
-            print(
-                "[INFO] 全ての item に既に値があります。前回の書き戻し結果を上書きする"
-                "経路は現時点ではありません（学習し直して付け直したい場合は、"
-                "LabelHistory から書き戻し前の版に戻してから再実行してください）"
-            )
-        elif report.skipped_low_score:
-            print(
-                f"[INFO] スコアが下限 {args.min_score} に届かない item が "
-                f"{report.skipped_low_score} 件ありました。--min-score を下げると増えます"
-            )
+        print(f"[INFO] dry-run のため labels.json は変更していません（候補 {total_recorded} 件）")
+    elif total_recorded == 0:
+        print("[INFO] 候補を付けられる item がありませんでした。labels.json は変更していません")
     else:
-        snapshot = commit_writeback(labels_path, data, written=total_written)
-        print(f"[INFO] 書き戻し前のスナップショット: {snapshot}")
-        print(f"[INFO] 書き戻しました: {labels_path}（{total_written} 件）")
+        # **スナップショットは取らない。**labels（確定値）を変えていないため、
+        # 履歴を残す意味が薄く、実行のたびに「変化のない版」で復元候補が埋まる。
+        # 書き込み自体は tmp + fsync + replace で壊さない。
+        write_json_atomic(labels_path, data)
+        print(f"[INFO] 候補を記録しました: {labels_path}（{total_recorded} 件）")
+        print("[INFO] labels（確定値）は変更していません。確定はラベリング画面で行います")
 
     update_job_progress(
         phase="done",
-        message="predict_unlabeled completed",
-        extra={"written": total_written, "per_head": per_head, "dry_run": bool(args.dry_run)},
+        message="predict_labels completed",
+        extra={
+            "recorded": total_recorded,
+            "per_head": per_head,
+            "dry_run": bool(args.dry_run),
+        },
     )
 
 
