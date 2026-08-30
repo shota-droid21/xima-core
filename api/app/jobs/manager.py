@@ -516,6 +516,28 @@ class JobsManager:
                     isinstance(raw, str) and re.search(r"(^|\s)--schema(\s|=)", raw)
                 ):
                     args.setdefault("schema", str(schema_path))
+            elif job_type == "predict_unlabeled":
+                # 未ラベル画像への書き戻し（T2-2）。infer_heads と違い入力は
+                # dataset/index.json ではなく labels.json であり、出力は JSON ではなく
+                # labels.json そのものへの書き戻しになる。
+                args = dict(args or {})
+                exp_dir = cfg.experiments_path_for(ws) / exp
+                models_dir = exp_dir / "models"
+                runs = (
+                    [p for p in models_dir.glob("run_*") if p.is_dir()]
+                    if models_dir.is_dir()
+                    else []
+                )
+                if not runs:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"no model runs found under {models_dir}. Run train_epoch first.",
+                    )
+                runs.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+                args.setdefault("labels", str(ensure_label_file(cfg, ws, exp)))
+                args.setdefault("run_dir", str(runs[0]))
+                args.setdefault("cache_root", str(exp_dir / "cache"))
+                args.setdefault("schema", str(cfg.label_schema_path_for(ws, exp)))
             elif job_type in ("infer_scores", "infer_heads"):
                 args = dict(args or {})
                 exp_dir = cfg.experiments_path_for(ws) / exp

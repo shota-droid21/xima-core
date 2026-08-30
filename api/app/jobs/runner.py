@@ -17,6 +17,7 @@ SCRIPT_FILENAMES = {
     "infer_scores": "infer_heads.py",
     "train_epoch": "train_epoch.py",
     "infer_heads": "infer_heads.py",
+    "predict_unlabeled": "predict_unlabeled.py",
 }
 
 
