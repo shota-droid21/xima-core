@@ -29,7 +29,7 @@
 # 違いは **app/（UI のソース）が隣にあるかどうか**だけで、これが app dist の
 # 入手経路（ローカルビルド or Releases）を分ける。
 #
-# 設計正本: docs/90_decisions.md Decision 035
+# 設計正本: docs/decisions.md Decision 035
 #
 set -euo pipefail
 

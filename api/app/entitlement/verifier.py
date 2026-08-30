@@ -1,7 +1,7 @@
 """エンタイトルメント検証（共通・不変）。
 
 署名 ＋ exp ＋ iss を検証する。信頼公開鍵と発行者は Source（差し替え点）が供給する。
-発行元を差し替えても本ロジックは変えない（docs/14 / Decision 030）。
+発行元を差し替えても本ロジックは変えない（docs/design/entitlement.md / Decision 030）。
 既存 auth_jwt と同じ EdDSA(Ed25519) / PyJWT を再利用（新暗号スタックは足さない）。
 """
 

@@ -2,7 +2,7 @@
 
 トークンの取得元と信頼公開鍵を供給する。今は LocalFileSource（ローカル署名キー）、
 将来は ManagerSource（control plane 発行）を追加するだけで済む。検証ロジック
-（verifier.py）と app 側状態モデルは不変（docs/14 / Decision 030）。
+（verifier.py）と app 側状態モデルは不変（docs/design/entitlement.md / Decision 030）。
 """
 
 from __future__ import annotations

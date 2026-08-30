@@ -1,6 +1,6 @@
 """local モードの配線（ミドルウェア / /local/session / CORS / 静的配信）。
 
-設計正本: docs/13_local_auth_and_launch.md。main.py を肥大化させないため分離。
+設計正本: docs/design/local-auth-and-launch.md。main.py を肥大化させないため分離。
 open / external モードでは強制を行わず、既存挙動を保つ。
 """
 

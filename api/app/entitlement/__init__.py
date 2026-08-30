@@ -1,4 +1,4 @@
-"""エンタイトルメント最小実装（U-3）。設計正本: docs/14_entitlement.md。"""
+"""エンタイトルメント最小実装（U-3）。設計正本: docs/design/entitlement.md。"""
 
 from __future__ import annotations
 

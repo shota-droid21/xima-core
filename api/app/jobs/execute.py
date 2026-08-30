@@ -4,7 +4,7 @@
 呼ばれる共通部。ジョブの正本は `state/jobs/<job_id>.json` / `.log`（Decision 004）で
 あり、本モジュールはその読み書きと Popen の実行だけを担う。
 
-設計正本: `docs/90_decisions.md` Decision 036。
+設計正本: `docs/decisions.md` Decision 036。
 """
 
 from __future__ import annotations

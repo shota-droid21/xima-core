@@ -8,7 +8,7 @@
 workspaces 配下の実ファイルを FileResponse で返す。Docker/nginx 構成では
 ルータを登録しない（env 未設定）ため既存挙動は完全に不変。
 
-設計正本: docs/13_local_auth_and_launch.md。
+設計正本: docs/design/local-auth-and-launch.md。
 """
 
 from __future__ import annotations

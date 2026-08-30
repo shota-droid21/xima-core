@@ -6,7 +6,7 @@
 # 非同期ジョブ（学習 / 推論 / 埋め込み）は API プロセス内の in-process ワーカーが
 # 実行するため、**Docker / redis / celery worker は不要**（Decision 036）。
 # ユーザは 1 コマンドで「ラベリング → 学習 → 精度 → クラスタ一括付与」まで完走できる
-# （docs/13 の Exit）。
+# （docs/design/local-auth-and-launch.md の Exit）。
 #
 #   ./scripts/run-local.sh
 #

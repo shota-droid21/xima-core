@@ -1,11 +1,11 @@
 """最小ローカル認証（local モード）のシークレット管理と検証。
 
-設計正本: docs/13_local_auth_and_launch.md。
+設計正本: docs/design/local-auth-and-launch.md。
 
 - 起動時に暗号学的乱数のシークレットを生成し、0600 ファイルに保存（再起動で再利用）。
 - app↔core の必須ヘッダ `X-Xima-Local-Key` の検証に用いる。
 - 信頼アンカーはファイル権限（別ユーザーを防ぐ）＋ loopback バインド＋CORS app 限定。
-  同一ユーザーの別プロセスは脅威モデル対象外（docs/13 参照）。
+  同一ユーザーの別プロセスは脅威モデル対象外（docs/design/local-auth-and-launch.md 参照）。
 """
 
 from __future__ import annotations

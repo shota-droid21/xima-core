@@ -86,7 +86,7 @@ def health() -> dict:
         # あれは workspaces を作った時点の記録であり、`ensure_identity` は既存が
         # あればそのまま返すため、更新しても永久に初回の値のままだった（#174）。
         "agent_version": CORE_VERSION,
-        # Backward compatibility（ワイヤ契約。app が読むため改称しない・docs/13 参照）
+        # Backward compatibility（ワイヤ契約。app が読むため改称しない・docs/design/local-auth-and-launch.md 参照）
         "version": CORE_VERSION,
         # workspaces を作成した版の記録。実行中の版とは別物なので分けて返す。
         "installed_agent_version": identity.agent_version,
