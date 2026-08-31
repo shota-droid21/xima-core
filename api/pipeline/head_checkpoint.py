@@ -45,3 +45,28 @@ def linear_shape(state: Mapping[str, Any]) -> Optional[Tuple[int, int]]:
     if shape is None or len(shape) < 2:
         return None
     return int(shape[0]), int(shape[1])
+
+
+# checkpoint に温度が無いときの既定。1.0 は「割らない」＝従来どおりの挙動。
+DEFAULT_TEMPERATURE = 1.0
+
+
+def read_temperature(ckpt: Mapping[str, Any]) -> float:
+    """checkpoint に保存された温度を返す。無い / 不正なら 1.0。
+
+    温度は logits を割るスカラーで、**argmax を変えない**。したがって古い
+    checkpoint を 1.0 として扱っても、これまでと同じ予測になる（確率が
+    校正されないだけ）。後方互換のために例外は投げない。
+    """
+    if not isinstance(ckpt, Mapping):
+        return DEFAULT_TEMPERATURE
+    raw = ckpt.get("temperature")
+    if raw is None:
+        return DEFAULT_TEMPERATURE
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_TEMPERATURE
+    if value <= 0 or value != value or value in (float("inf"), float("-inf")):
+        return DEFAULT_TEMPERATURE
+    return value

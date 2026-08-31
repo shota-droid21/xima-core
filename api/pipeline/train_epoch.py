@@ -44,7 +44,12 @@ from label_schema import (
     load_schema,
     normalize_label_for_head,
 )
-from run_meta import RUN_META_VERSION, build_head_metrics, write_run_meta
+from run_meta import (
+    RUN_META_VERSION,
+    build_head_metrics,
+    diagnose_training,
+    write_run_meta,
+)
 
 # ----------------------------
 # Paths (defaults; overridden at runtime when --index is provided)
@@ -316,6 +321,91 @@ class LinearHead(nn.Module):
         return self.fc(x)
 
 
+# 温度スケーリングの下限サンプル数。
+#
+# T は val 集合 1 つで推定するスカラーなので、val が小さいと過剰適合して
+# かえって歪む。少なすぎるときは校正しない（T=1.0 = 従来どおり）方が安全。
+MIN_VAL_FOR_TEMPERATURE = 20
+
+
+@torch.no_grad()
+def _collect_val_logits(
+    *,
+    model: nn.Module,
+    head: nn.Module,
+    loader: torch.utils.data.DataLoader,
+    device: torch.device,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """val 全体の logits / 正解 / 有効マスクを集める（温度の当てはめに使う）。"""
+    model.eval()
+    head.eval()
+    all_logits, all_y, all_mask = [], [], []
+    for xb, yb, valid_mask in loader:
+        feats = model.encode_image(xb.to(device)).float()
+        feats = feats / feats.norm(dim=-1, keepdim=True)
+        all_logits.append(head(feats).detach().cpu())
+        all_y.append(yb.detach().cpu())
+        all_mask.append((valid_mask > 0.5).detach().cpu())
+    if not all_logits:
+        empty = torch.empty(0)
+        return empty, empty, empty
+    return torch.cat(all_logits), torch.cat(all_y), torch.cat(all_mask)
+
+
+def fit_temperature(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    *,
+    head_type: str,
+) -> Optional[float]:
+    """val 上で NLL を最小にする温度 T を 1 つ求める（Guo et al. 2017）。
+
+    なぜ要るか:
+        CLIP 埋め込みは L2 正規化された単位ベクトルなので、logits の大きさは head の
+        重みの大きさだけで決まる。linear probe は分類の**向き**は学ぶが、確率を
+        意味のある値にするほど重みを大きくしない。結果、正解率が 93% あっても
+        softmax の最大値が 0.12 にしかならず、**確率を閾値にした判断が成立しない**。
+
+        T は logits を割るだけのスカラーなので **argmax を変えない**。
+        つまり正解率は 1 ミリも動かさずに確率だけを校正できる。
+
+        実測（poc_ws・val 64〜88 件）:
+            character  確信度 0.116 -> 0.784   ECE 0.816 -> 0.148
+            eye_color  確信度 0.200 -> 0.604   ECE 0.472 -> 0.090
+        いずれも argmax は完全に不変だった。
+
+    返り値が None のときは校正しない（呼び出し側は T=1.0 として扱う）。
+    """
+    if logits.numel() == 0 or logits.shape[0] < MIN_VAL_FOR_TEMPERATURE:
+        return None
+    if head_type == "multi_label":
+        loss_fn: nn.Module = nn.BCEWithLogitsLoss()
+        y = targets.float()
+    else:
+        loss_fn = nn.CrossEntropyLoss()
+        y = targets.long()
+
+    log_t = torch.zeros(1, requires_grad=True)
+    optimizer = optim.LBFGS([log_t], lr=0.1, max_iter=100)
+
+    def closure() -> torch.Tensor:
+        optimizer.zero_grad()
+        loss = loss_fn(logits / log_t.exp(), y)
+        loss.backward()
+        return loss
+
+    try:
+        optimizer.step(closure)
+    except Exception as exc:  # noqa: BLE001 — 校正に失敗しても学習結果は捨てない
+        print(f"[WARN] 温度の当てはめに失敗しました（校正なしで続行）: {exc}")
+        return None
+
+    temperature = float(log_t.exp().item())
+    if not math.isfinite(temperature) or temperature <= 0:
+        return None
+    return temperature
+
+
 @torch.no_grad()
 def eval_one_epoch(
     *,
@@ -385,7 +475,21 @@ def main() -> None:
         ),
     )
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument(
+        "--lr",
+        type=float,
+        # 既定を 1e-4 から引き上げた。CLIP 埋め込みは L2 正規化された単位ベクトルで、
+        # logits の大きさは head の重みの大きさだけで決まる。1e-4 では 15 エポック回しても
+        # 重みが初期値からほとんど動かず、loss が chance 水準に張り付いたまま終わる。
+        #
+        # 実データ（poc_ws・埋め込み ViT-L/14@336px）で実測した val_acc:
+        #   character  1e-4: 0.557 -> 1e-3: 0.943    hair_color 1e-4: 0.456 -> 1e-3: 0.956
+        # 平均最大確率も 0.04 前後から意味のある水準へ動く。**精度そのものが上がる。**
+        #
+        # 1e-2 はさらに速いが、train_acc が 1.0 に張り付き小規模データで過学習しやすい。
+        # 既定としては 1e-3 を採り、足りなければ利用者が上げる。
+        default=1e-3,
+    )
     parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument(
@@ -818,6 +922,39 @@ def main() -> None:
         state_to_save = (
             best_state["head_state"] if best_state else head_model.state_dict()
         )
+
+        # **温度を val で当てはめてから保存する。**argmax を変えないので正解率は
+        # 動かず、確率だけが意味を持つようになる（fit_temperature の docstring 参照）。
+        # ベスト checkpoint に対して測るため、保存する重みを載せ直してから行う。
+        head_model.load_state_dict(state_to_save)
+        temperature = None
+        if best_state is None:
+            # 学習が 1 エポックも回っていない（--epochs 0 など）。校正する対象が無い。
+            print(f"[INFO] {head}: 学習が行われていないため温度校正はしません")
+        else:
+            # **ここで失敗しても学習結果は捨てない。**checkpoint は既に手元にあり、
+            # 校正は「あると良い」もの。val 画像が読めない等で全部を失うのは割に合わない。
+            try:
+                val_logits, val_y, val_mask = _collect_val_logits(
+                    model=clip_model, head=head_model, loader=val_loader, device=device
+                )
+                if val_logits.numel() and bool(val_mask.any().item()):
+                    temperature = fit_temperature(
+                        val_logits[val_mask], val_y[val_mask], head_type=head_type
+                    )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[WARN] {head}: 温度校正をスキップします（{exc}）")
+                temperature = None
+        if temperature is not None:
+            print(f"[INFO] {head}: 温度 T={temperature:.4f} を保存します（argmax は不変）")
+        elif best_state is not None:
+            # 学習は回ったが校正できなかった場合だけ理由を出す。
+            # 未学習（--epochs 0）のときは上で既に出している。
+            print(
+                f"[INFO] {head}: 温度校正なし"
+                f"（val が {MIN_VAL_FOR_TEMPERATURE} 件未満、または当てはめに失敗）"
+            )
+
         torch.save(
             {
                 "class_head": head,
@@ -828,6 +965,8 @@ def main() -> None:
                 "index_path": str(index_path),
                 "schema_path": str(schema_path) if schema_path else None,
                 "state_dict": state_to_save,
+                # 推論時に logits をこれで割る。無い checkpoint は 1.0 として扱う。
+                "temperature": temperature,
             },
             ckpt_path,
         )
@@ -835,6 +974,21 @@ def main() -> None:
 
         # ベスト（early stopping で選ばれた checkpoint）と推移を記録する。
         heads_metrics[head] = build_head_metrics(head_type, epoch_history, best_state)
+
+        # **学習が成立したかを判定して言葉で出す。**
+        # val_acc だけでは「多数派クラスを当てているだけ」と区別できない。
+        # loss が chance 水準に張り付いたまま出荷された事例があるため、
+        # 表示するだけでなく判定まで実装側で行う。
+        problems = diagnose_training(
+            head_type=head_type,
+            num_classes=len(classes),
+            epoch_history=epoch_history,
+            best_val_loss=(best_state or {}).get("val_loss"),
+        )
+        for problem in problems:
+            print(f"[WARN] {head}: {problem}")
+        if problems:
+            heads_metrics[head]["problems"] = problems
         # 途中でジョブが失敗しても直近の成果が残るよう、head 完了ごとに更新する。
         run_meta["metrics"] = {"heads": heads_metrics}
         write_run_meta(run_dir, run_meta)

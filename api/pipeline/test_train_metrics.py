@@ -48,3 +48,79 @@ def test_build_head_metrics_without_training_is_null_safe() -> None:
     assert m["best"]["epoch"] is None
     assert m["best"]["val_acc"] is None
     assert m["best"]["val_loss"] is None
+
+
+# --------------------------------------------------------- diagnose_training
+
+import math  # noqa: E402
+
+from run_meta import chance_loss, diagnose_training  # noqa: E402
+
+
+def _history(losses):
+    return [{"epoch": i, "val_loss": v, "val_acc": 0.5} for i, v in enumerate(losses)]
+
+
+def test_chance_loss_is_log_num_classes():
+    assert abs(chance_loss("multi_class", 30) - math.log(30)) < 1e-9
+
+
+def test_chance_loss_for_multi_label_is_log_two():
+    assert abs(chance_loss("multi_label", 11) - math.log(2)) < 1e-9
+
+
+def test_chance_loss_none_for_degenerate():
+    assert chance_loss("multi_class", 1) is None
+
+
+def test_flags_loss_stuck_at_chance():
+    # 実際に出荷された character head の形（ln(30)=3.401 から 3.26 までしか動かない）
+    losses = [3.41 - i * 0.011 for i in range(15)]
+    problems = diagnose_training(
+        head_type="multi_class", num_classes=30,
+        epoch_history=_history(losses), best_val_loss=losses[-1],
+    )
+    assert any("当てずっぽう" in p for p in problems)
+
+
+def test_flags_still_improving_at_last_epoch():
+    losses = [3.41 - i * 0.011 for i in range(15)]
+    problems = diagnose_training(
+        head_type="multi_class", num_classes=30,
+        epoch_history=_history(losses), best_val_loss=losses[-1],
+    )
+    assert any("下がり続けています" in p for p in problems)
+
+
+def test_converged_run_is_clean():
+    # 十分下がってから平らになった形
+    losses = [3.4, 2.0, 1.0, 0.5, 0.32, 0.31, 0.305, 0.304, 0.3039, 0.3038]
+    problems = diagnose_training(
+        head_type="multi_class", num_classes=30,
+        epoch_history=_history(losses), best_val_loss=losses[-1],
+    )
+    assert problems == []
+
+
+def test_low_loss_but_still_falling_is_flagged():
+    # chance からは離れているが収束していない
+    losses = [3.4, 2.4, 1.4, 0.9, 0.5]
+    problems = diagnose_training(
+        head_type="multi_class", num_classes=30,
+        epoch_history=_history(losses), best_val_loss=losses[-1],
+    )
+    assert len(problems) == 1 and "下がり続けています" in problems[0]
+
+
+def test_no_history_yields_no_problems():
+    assert diagnose_training(
+        head_type="multi_class", num_classes=30,
+        epoch_history=[], best_val_loss=None,
+    ) == []
+
+
+def test_history_without_val_loss_is_tolerated():
+    assert diagnose_training(
+        head_type="multi_class", num_classes=30,
+        epoch_history=[{"epoch": 0, "val_acc": 0.5}], best_val_loss=None,
+    ) == []

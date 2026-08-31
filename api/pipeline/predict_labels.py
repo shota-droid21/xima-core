@@ -44,7 +44,11 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 from embedding_cache import embeddings_dir, load_index  # noqa: E402
-from head_checkpoint import linear_shape, normalize_state_dict  # noqa: E402
+from head_checkpoint import (  # noqa: E402
+    linear_shape,
+    normalize_state_dict,
+    read_temperature,
+)
 from job_progress import update_job_progress  # noqa: E402
 from label_schema import canonical_head_type, get_heads, load_schema  # noqa: E402
 from label_predictions import (  # noqa: E402
@@ -195,6 +199,9 @@ def main() -> None:
         model = torch.nn.Linear(in_dim, num_classes)
         model.load_state_dict(state)
         model.eval()
+        temperature = read_temperature(ckpt)
+        if temperature != 1.0:
+            print(f"[INFO] {head}: 温度 T={temperature:.4f} を適用します")
 
         # **全 item が対象**（削除対象を除く）。class 追加・再ラベルの場面で
         # 既ラベル画像の候補も要るため。labels に書かないので広げても安全。
@@ -209,7 +216,9 @@ def main() -> None:
                 chunk = candidates[chunk_start : chunk_start + 512]
                 idx = [rows_by_file_id[str(it["file_id"])] for it in chunk]
                 feats = torch.from_numpy(matrix[idx]).float()
-                logits = model(feats)
+                # 温度で割ってから確率にする。argmax は変わらず、確率だけが校正される
+                # （学習時に val で当てはめた値。無い checkpoint は 1.0）。
+                logits = model(feats) / temperature
                 probs = (
                     torch.sigmoid(logits)
                     if head_type == "multi_label"

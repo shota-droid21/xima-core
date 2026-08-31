@@ -395,13 +395,22 @@ def main() -> None:
         head_model.load_state_dict(state)
         head_model.to(device)
         head_model.eval()
+        # 学習時に val で当てはめた温度。無い checkpoint は 1.0（従来どおり）。
+        # argmax は変わらないため、既存の scores を読む側の解釈は壊れない。
+        temperature = float(ckpt.get("temperature") or 1.0)
+        if temperature <= 0:
+            temperature = 1.0
+        if temperature != 1.0:
+            print(f"[INFO] head '{head}': 温度 T={temperature:.4f} を適用します")
 
         with torch.no_grad():
             for idx in target_indices:
                 feat = feats_by_index.get(idx)
                 if feat is None:
                     continue
-                logits = head_model(feat.to(device)).detach().cpu().float()
+                logits = (
+                    head_model(feat.to(device)).detach().cpu().float() / temperature
+                )
                 if head_type == "multi_label":
                     probs = torch.sigmoid(logits)
                 else:
