@@ -39,7 +39,7 @@ def test_has_label_ignores_predictions():
     item = _item("a")
     record_prediction(
         item, head="character", head_type="multi_class",
-        prediction=Prediction("alice", 0.9, []), run_name="run_x",
+        prediction=Prediction("alice", 0.9, 0.0, []), run_name="run_x",
     )
     assert has_label(item, "character") is False
 
@@ -86,6 +86,27 @@ def test_multi_class_picks_argmax_without_threshold():
     assert p is not None and p.value == "alice" and p.score == 0.31
 
 
+def test_margin_is_gap_between_top_two():
+    # score の絶対値は当てにならない（クラス数が多いと softmax が平坦になる）。
+    # 順位差のほうがクラス数に依存せず比較しやすい。
+    p = prediction_from_scores({"a": 0.31, "b": 0.30, "c": 0.29}, head_type="multi_class")
+    assert p is not None and abs(p.margin - 0.01) < 1e-9
+
+
+def test_margin_is_score_when_single_class():
+    p = prediction_from_scores({"only": 1.0}, head_type="multi_class")
+    assert p is not None and p.margin == 1.0
+
+
+def test_record_stores_margin():
+    item = _item("a")
+    record_prediction(
+        item, head="h", head_type="multi_class",
+        prediction=Prediction("x", 0.31, 0.01, []), run_name="r",
+    )
+    assert item[PREDICTED_KEY]["h"]["margin"] == 0.01
+
+
 def test_multi_label_uses_sigmoid_decision_point():
     p = prediction_from_scores({"a": 0.9, "b": 0.6, "c": 0.1}, head_type="multi_label")
     assert p is not None and sorted(p.value) == ["a", "b"]
@@ -118,7 +139,7 @@ def test_record_never_touches_labels():
     item = _item("a", labels={"split": "unassigned"})
     record_prediction(
         item, head="character", head_type="multi_class",
-        prediction=Prediction("alice", 0.83, [{"class": "alice", "score": 0.83}]),
+        prediction=Prediction("alice", 0.83, 0.0, [{"class": "alice", "score": 0.83}]),
         run_name="run_x", now="2026-08-31T00:00:00",
     )
     # ここが本モジュールの最重要契約
@@ -130,7 +151,7 @@ def test_record_does_not_set_committed():
     item = _item("a")
     record_prediction(
         item, head="h", head_type="multi_class",
-        prediction=Prediction("x", 0.9, []), run_name="run_x",
+        prediction=Prediction("x", 0.9, 0.0, []), run_name="run_x",
     )
     assert "committed" not in item
 
@@ -139,7 +160,7 @@ def test_record_stores_provenance():
     item = _item("a")
     record_prediction(
         item, head="character", head_type="multi_class",
-        prediction=Prediction("alice", 0.83, [{"class": "alice", "score": 0.83}]),
+        prediction=Prediction("alice", 0.83, 0.0, [{"class": "alice", "score": 0.83}]),
         run_name="run_20260830", now="2026-08-31T00:00:00",
     )
     rec = item[PREDICTED_KEY]["character"]
@@ -153,9 +174,9 @@ def test_record_stores_provenance():
 def test_record_keeps_other_heads():
     item = _item("a")
     record_prediction(item, head="h1", head_type="multi_class",
-                      prediction=Prediction("x", 0.9, []), run_name="r")
+                      prediction=Prediction("x", 0.9, 0.0, []), run_name="r")
     record_prediction(item, head="h2", head_type="multi_class",
-                      prediction=Prediction("y", 0.8, []), run_name="r")
+                      prediction=Prediction("y", 0.8, 0.0, []), run_name="r")
     assert set(item[PREDICTED_KEY]) == {"h1", "h2"}
 
 
@@ -163,9 +184,9 @@ def test_record_overwrites_same_head_on_rerun():
     # 学習し直したら候補は更新されてよい。labels ではないため作業は失われない。
     item = _item("a")
     record_prediction(item, head="h", head_type="multi_class",
-                      prediction=Prediction("x", 0.5, []), run_name="run_old")
+                      prediction=Prediction("x", 0.5, 0.0, []), run_name="run_old")
     record_prediction(item, head="h", head_type="multi_class",
-                      prediction=Prediction("y", 0.9, []), run_name="run_new")
+                      prediction=Prediction("y", 0.9, 0.0, []), run_name="run_new")
     assert item[PREDICTED_KEY]["h"]["value"] == "y"
     assert item[PREDICTED_KEY]["h"]["run"] == "run_new"
 

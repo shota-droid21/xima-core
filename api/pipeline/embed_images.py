@@ -41,7 +41,7 @@ from embedding_cache import (
     plan_embeddings,
     save_index,
 )
-from image_io import load_image_rgb
+from image_io import is_decodable_image, load_image_rgb
 from job_progress import update_job_progress
 
 
@@ -78,6 +78,7 @@ def build_targets(items: List[Dict[str, Any]], root: Path) -> List[Dict[str, Any
     """
     targets: List[Dict[str, Any]] = []
     missing = 0
+    unreadable: List[str] = []
     for item in items:
         rel_path = item.get("path")
         if not rel_path:
@@ -88,6 +89,11 @@ def build_targets(items: List[Dict[str, Any]], root: Path) -> List[Dict[str, Any
         if not src.exists() or not src.is_file():
             missing += 1
             continue
+        # **読めない画像はここで外す。**残すと DataLoader の中で例外になり、
+        # 1 枚のゴミでジョブ全体が落ちる（実データで 879 枚中 21 枚が HTML だった）。
+        if not is_decodable_image(src):
+            unreadable.append(str(rel_path))
+            continue
         targets.append(
             {
                 "file_id": str(file_id),
@@ -97,7 +103,18 @@ def build_targets(items: List[Dict[str, Any]], root: Path) -> List[Dict[str, Any
             }
         )
     if missing:
-        print(f"[WARN] skipped {missing} item(s) without a readable image file")
+        print(f"[WARN] 画像ファイルが見つからない item を {missing} 件スキップしました")
+    if unreadable:
+        # **黙って落とさない。**枚数が減った理由が分からないと、精度が出ない原因を
+        # モデル側に探しに行くことになる。何件で、どれかを名指しする。
+        print(
+            f"[WARN] 画像として読めないファイルを {len(unreadable)} 件スキップしました"
+            "（拡張子は画像でも中身が違うものがあります）:"
+        )
+        for rel in unreadable[:10]:
+            print(f"[WARN]   {rel}")
+        if len(unreadable) > 10:
+            print(f"[WARN]   ... 他 {len(unreadable) - 10} 件")
     return targets
 
 

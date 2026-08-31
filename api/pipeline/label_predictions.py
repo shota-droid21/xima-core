@@ -57,10 +57,21 @@ MULTI_LABEL_DECISION_POINT = 0.5
 
 @dataclass(frozen=True)
 class Prediction:
-    """1 item・1 head 分の予測。閾値による足切りはしない。"""
+    """1 item・1 head 分の予測。閾値による足切りはしない。
+
+    `score` を**確信度として読んではいけない。**実データで確認したところ、
+    head は正しく分類できている（人がラベルした 185 件に対し argmax 一致率 91.4%）のに、
+    logits の幅が -0.22..0.15 しかなく、30 クラスの softmax はほぼ一様になる
+    （最大でも 0.042）。埋め込みが L2 正規化された単位ベクトルで、head の重みが小さいまま
+    学習が終わるため、**確率の絶対値に意味が無い**。
+
+    使えるのは**順位**と `margin`（1 位と 2 位の差）である。「見ないで確定してよいか」を
+    絶対確率の閾値で決める設計は、この学習設定では成立しない。
+    """
 
     value: Any                  # multi_class は str、multi_label は list[str]
-    score: float                # multi_class は最尤クラスの確率、multi_label は最大確率
+    score: float                # 1 位の確率。**絶対値に意味は無い**（上記）
+    margin: float               # 1 位と 2 位の差。クラス数に依存しないぶん比較しやすい
     top: List[Dict[str, Any]]   # 上位クラスと確率（tooltip 用）
 
 
@@ -126,13 +137,16 @@ def prediction_from_scores(
         return None
 
     top = [{"class": k, "score": round(v, 6)} for k, v in ranked[:TOP_K]]
+    margin = ranked[0][1] - (ranked[1][1] if len(ranked) > 1 else 0.0)
 
     if head_type == "multi_label":
         selected = [k for k, v in ranked if v >= MULTI_LABEL_DECISION_POINT]
-        return Prediction(value=selected, score=ranked[0][1], top=top)
+        return Prediction(
+            value=selected, score=ranked[0][1], margin=margin, top=top
+        )
 
     best_class, best_score = ranked[0]
-    return Prediction(value=best_class, score=best_score, top=top)
+    return Prediction(value=best_class, score=best_score, margin=margin, top=top)
 
 
 def record_prediction(
@@ -155,6 +169,7 @@ def record_prediction(
         "head_type": head_type,
         "value": prediction.value,
         "score": round(float(prediction.score), 6),
+        "margin": round(float(prediction.margin), 6),
         "top": prediction.top,
         "run": run_name,
         "at": now or time.strftime("%Y-%m-%dT%H:%M:%S"),
