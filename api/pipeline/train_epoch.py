@@ -384,13 +384,25 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="CLIP + Linear Head で dataset/index.json を用いて学習 (multi-head)"
     )
-    parser.add_argument("--epochs", type=int, default=15)
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        # 15 から引き上げた。特徴を run 内で 1 度しか符号化しなくなり
+        # （feature_cache）、1 エポックが 67 秒から 0.02 秒になったため、
+        # 100 エポックでも学習部分は数秒で終わる。実データでは 60 エポック回しても
+        # val_loss がまだ下がっていた（character 2.977 -> 0.554）。
+        default=100,
+    )
     parser.add_argument(
         "--early-stopping-patience",
         type=int,
-        default=0,
+        # 0（無効）から 10 へ。判定を val_loss に変えたので、これは
+        # 「途中の停滞で切る」ためではなく **過学習し始めたら止める**ための網である。
+        # val_acc 基準のときに使われていた 4〜5 は、val_loss がまだ急降下している
+        # 最中に切ってしまい実害が出ていた。
+        default=10,
         help=(
-            "val_acc がこのエポック数連続で改善しなければ学習を打ち切る。"
+            "val_loss がこのエポック数連続で改善しなければ学習を打ち切る。"
             " 0 の場合は early stopping を無効にする。"
         ),
     )
@@ -747,7 +759,7 @@ def main() -> None:
             weight_decay=float(args.weight_decay),
         )
 
-        best_acc = -1.0
+        best_val_loss = math.inf
         best_state: Optional[Dict[str, Any]] = None
         epochs_since_improve = 0
         # このヘッドのエポック推移（UI の精度表示・推移グラフ用）。
@@ -869,9 +881,27 @@ def main() -> None:
                 },
             )
 
-            improved = val_acc > best_acc
+            # **val_loss で選ぶ（val_acc ではない）。**
+            #
+            # val_acc は階段関数である。val 192 件なら 1 枚 = 0.52% 刻みで、
+            # ノイズで数エポック横ばいに見えるのは普通だが、その間 val_loss は
+            # 下がり続けている。実データでは patience=5 で
+            #   character  8 epoch で停止し epoch 3 を採用（acc 0.812 / ≥0.90 帯 96 件）
+            # となり、最後まで回せば acc 0.896 / ≥0.90 帯 146 件に届いていた。
+            #
+            # multi_label では更に悪い。val_acc は per-element なので、
+            # hair_color（11 クラス・1 画像あたり平均 1.50 個が正）では
+            # 「1 つも付けない」と答えるだけで 0.864 になる。その結果 val_acc 基準は
+            # **epoch 1 の「何も予測しないモデル」を最良として採用**していた
+            # （集合の完全一致は 0.000）。
+            #
+            # 加えて、確率の質を決めるのは loss である。温度校正も一括確定の実測表も
+            # loss の世界の話なので、acc で選ぶと「一括確定に使う値」を acc で選ぶことになる。
+            #
+            # val_acc は指標として記録・表示を続ける（history / best に入っている）。
+            improved = val_loss < best_val_loss
             if improved:
-                best_acc = val_acc
+                best_val_loss = val_loss
                 best_state = {
                     "head_state": {
                         k: v.detach().cpu() for k, v in head_model.state_dict().items()
@@ -888,7 +918,8 @@ def main() -> None:
                 args.early_stopping_patience
             ):
                 print(
-                    f"[INFO] early stopping triggered (patience={args.early_stopping_patience}) for head={head}"
+                    f"[INFO] early stopping triggered (val_loss が "
+                    f"{args.early_stopping_patience} エポック改善せず) for head={head}"
                 )
                 break
 
