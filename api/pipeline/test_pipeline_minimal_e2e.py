@@ -15,6 +15,15 @@ def _write_file(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def _write_tiny_image(path: Path) -> None:
+    """PIL で読める最小の画像。CLIP は stub なので中身は問わないが、
+    `image_io.is_decodable_image` は本物の PIL で判定するため実体が要る。"""
+    from PIL import Image
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (2, 2), (127, 127, 127)).save(path, format="JPEG")
+
+
 def _write_fake_ml_stubs(stub_root: Path) -> None:
     _write_file(
         stub_root / "torch" / "__init__.py",
@@ -100,6 +109,10 @@ class FakeTensor:
             return FakeTensor(shape=tail)
         return FakeTensor(shape=())
 
+    def __setitem__(self, _idx, _value):
+        # build_targets が行ごとに書き込む。値は検証しないので受けるだけ。
+        return None
+
     def numel(self):
         out = 1
         for n in self.shape:
@@ -147,6 +160,31 @@ def tensor(value, dtype=None):
     if isinstance(value, list):
         return FakeTensor(shape=(len(value),), data=value)
     return FakeTensor(shape=())
+
+
+def empty(shape, dtype=None):
+    return FakeTensor(shape=shape)
+
+
+def full(shape, _fill, dtype=None):
+    return FakeTensor(shape=shape)
+
+
+def cat(tensors, dim=0):
+    # 行方向の連結だけ扱う。encode_features がバッチごとの特徴をまとめる用。
+    parts = list(tensors)
+    if not parts:
+        return FakeTensor(shape=(0,))
+    rows = 0
+    tail = ()
+    for t in parts:
+        shape = getattr(t, "shape", ())
+        if not shape:
+            rows += 1
+            continue
+        rows += int(shape[0])
+        tail = tuple(shape[1:])
+    return FakeTensor(shape=(rows,) + tail)
 
 
 def sigmoid(x):
@@ -268,13 +306,30 @@ class CrossEntropyLoss(_Loss):
     )
     _write_file(
         stub_root / "torch" / "utils" / "data.py",
-        """class Dataset:
+        """from .. import FakeTensor
+
+
+class Dataset:
     pass
+
+
+class TensorDataset:
+    # (特徴, 正解, 有効マスク) を行で束ねるだけ。値は検証しない。
+    def __init__(self, *tensors):
+        self.tensors = tensors
+
+    def __len__(self):
+        shape = getattr(self.tensors[0], "shape", ()) if self.tensors else ()
+        return int(shape[0]) if shape else 0
+
+    def __getitem__(self, i):
+        return tuple(t[i] for t in self.tensors)
 
 
 class _Batch:
     def __init__(self, items):
         self.items = list(items)
+        self.shape = (len(self.items),)
 
     def to(self, _device):
         return self
@@ -312,12 +367,20 @@ class DataLoader:
             if not batch:
                 continue
             first = batch[0]
-            if isinstance(first, tuple) and len(first) == 2:
+            if isinstance(first, tuple) and len(first) == 3:
+                # (特徴, 正解, 有効マスク)。train_epoch の学習・評価ループの形。
+                yield (
+                    FakeTensor(shape=(len(batch), 64)),
+                    FakeTensor(shape=(len(batch),)),
+                    FakeTensor(shape=(len(batch),)),
+                )
+            elif isinstance(first, tuple) and len(first) == 2:
                 xs = [b[0] for b in batch]
                 idxs = [b[1] for b in batch]
                 yield _Batch(xs), _IndexList(idxs)
             else:
-                yield first
+                # 画像だけを出す ImageDataset（符号化の 1 周）
+                yield _Batch(batch)
 """,
     )
     _write_file(
@@ -380,8 +443,10 @@ def test_pipeline_apply_train_infer_with_multilabel_and_single_class_compat(
 ) -> None:
     source_dir = tmp_path / "source_images"
     source_dir.mkdir(parents=True, exist_ok=True)
-    (source_dir / "a.jpg").write_bytes(b"a")
-    (source_dir / "b.jpg").write_bytes(b"b")
+    # 中身のあるダミー画像にする。train_epoch は run の最初に画像を 1 度だけ
+    # 符号化するため、読めないファイルは除外されて「対象 0 枚」で止まる。
+    _write_tiny_image(source_dir / "a.jpg")
+    _write_tiny_image(source_dir / "b.jpg")
 
     exp_dir = tmp_path / "workspaces" / "ws01" / "experiments" / "exp01"
     label_input_dir = exp_dir / "label_input"

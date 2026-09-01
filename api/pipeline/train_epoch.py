@@ -30,12 +30,18 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from PIL import Image
 
 import clip
 
 from device import _normalize_device_name, get_device
-from image_io import load_image_rgb
+from feature_cache import (
+    FEATURE_MEMORY_WARN_BYTES,
+    build_targets,
+    encode_features,
+    feature_loader,
+    feature_memory_bytes,
+    usable_items,
+)
 from job_progress import update_job_progress
 from label_schema import (
     canonical_head_type,
@@ -93,59 +99,6 @@ class ItemRec:
     labels: Dict[str, Any]
 
 
-class IndexDataset(torch.utils.data.Dataset):
-    def __init__(
-        self,
-        items: List[ItemRec],
-        *,
-        dataset_root: Path,
-        class_head: str,
-        head_type: str,
-        head_schema: Optional[Dict[str, Any]],
-        clip_preprocess,
-        class_to_idx: Dict[str, int],
-    ) -> None:
-        self.items = items
-        self.dataset_root = dataset_root
-        self.class_head = class_head
-        self.head_type = head_type
-        self.head_schema = head_schema or {"type": head_type}
-        self.clip_preprocess = clip_preprocess
-        self.class_to_idx = class_to_idx
-
-    def __len__(self) -> int:
-        return len(self.items)
-
-    def __getitem__(self, i: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        item = self.items[i]
-        path = (self.dataset_root / item.dataset_path).resolve()
-        img = load_image_rgb(path)
-        img_tensor = self.clip_preprocess(img)
-
-        y_raw = (item.labels or {}).get(self.class_head)
-        if self.head_type == "multi_label":
-            y_norm = normalize_label_for_head(y_raw, self.head_schema)
-            y = torch.zeros(len(self.class_to_idx), dtype=torch.float32)
-            if y_norm is None:
-                return img_tensor, y, torch.tensor(0.0, dtype=torch.float32)
-
-            labels = y_norm if isinstance(y_norm, list) else [str(y_norm)]
-            for label in labels:
-                idx = self.class_to_idx.get(str(label))
-                if idx is not None:
-                    y[idx] = 1.0
-            return img_tensor, y, torch.tensor(1.0, dtype=torch.float32)
-
-        y_norm = normalize_label_for_head(y_raw, self.head_schema)
-        idx = self.class_to_idx.get(str(y_norm), -1) if y_norm is not None else -1
-        valid = 1.0 if idx >= 0 else 0.0
-        return (
-            img_tensor,
-            torch.tensor(idx, dtype=torch.long),
-            torch.tensor(valid, dtype=torch.float32),
-        )
-
-
 def _collect_items(index_data: Dict[str, Any], split: str) -> List[ItemRec]:
     out: List[ItemRec] = []
     for it in index_data.get("items", []) or []:
@@ -163,67 +116,6 @@ def _collect_items(index_data: Dict[str, Any], split: str) -> List[ItemRec]:
             )
         )
     return out
-
-
-def build_dataloaders(
-    *,
-    index_data: Dict[str, Any],
-    class_head: str,
-    head_type: str,
-    head_schema: Optional[Dict[str, Any]],
-    clip_preprocess,
-    batch_size: int,
-    num_workers: int,
-    dataset_root: Path,
-    class_names: List[str],
-    pin_memory: bool,
-) -> Tuple[
-    IndexDataset,
-    torch.utils.data.DataLoader,
-    IndexDataset,
-    torch.utils.data.DataLoader,
-    Dict[str, int],
-]:
-    train_items = _collect_items(index_data, "train")
-    val_items = _collect_items(index_data, "val")
-
-    class_to_idx = {c: i for i, c in enumerate(class_names)}
-
-    train_ds = IndexDataset(
-        train_items,
-        dataset_root=dataset_root,
-        class_head=class_head,
-        head_type=head_type,
-        head_schema=head_schema,
-        clip_preprocess=clip_preprocess,
-        class_to_idx=class_to_idx,
-    )
-    val_ds = IndexDataset(
-        val_items,
-        dataset_root=dataset_root,
-        class_head=class_head,
-        head_type=head_type,
-        head_schema=head_schema,
-        clip_preprocess=clip_preprocess,
-        class_to_idx=class_to_idx,
-    )
-
-    train_loader = torch.utils.data.DataLoader(
-        train_ds,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-    )
-    val_loader = torch.utils.data.DataLoader(
-        val_ds,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-    )
-
-    return train_ds, train_loader, val_ds, val_loader, class_to_idx
 
 
 def collect_classes_from_items(
@@ -340,19 +232,15 @@ MAX_TEMPERATURE = 100.0
 @torch.no_grad()
 def _collect_val_logits(
     *,
-    model: nn.Module,
     head: nn.Module,
     loader: torch.utils.data.DataLoader,
     device: torch.device,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """val 全体の logits / 正解 / 有効マスクを集める（温度の当てはめに使う）。"""
-    model.eval()
     head.eval()
     all_logits, all_y, all_mask = [], [], []
     for xb, yb, valid_mask in loader:
-        feats = model.encode_image(xb.to(device)).float()
-        feats = feats / feats.norm(dim=-1, keepdim=True)
-        all_logits.append(head(feats).detach().cpu())
+        all_logits.append(head(xb.to(device)).detach().cpu())
         all_y.append(yb.detach().cpu())
         all_mask.append((valid_mask > 0.5).detach().cpu())
     if not all_logits:
@@ -442,14 +330,16 @@ def fit_temperature(
 @torch.no_grad()
 def eval_one_epoch(
     *,
-    model: nn.Module,
     head: nn.Module,
     loader: torch.utils.data.DataLoader,
     device: torch.device,
     head_type: str,
     loss_fn: nn.Module,
 ) -> Tuple[float, float]:
-    model.eval()
+    """loader は **符号化済みの特徴**を出す（`feature_cache.feature_loader`）。
+
+    CLIP はここには現れない。特徴は run の最初に 1 度だけ計算される。
+    """
     head.eval()
 
     total_units = 0
@@ -458,11 +348,8 @@ def eval_one_epoch(
     eval_steps = 0
 
     for xb, yb, valid_mask in loader:
-        xb = xb.to(device)
         valid_mask = valid_mask.to(device) > 0.5
-        feats = model.encode_image(xb).float()
-        feats = feats / feats.norm(dim=-1, keepdim=True)
-        logits = head(feats)
+        logits = head(xb.to(device))
 
         if not bool(valid_mask.any().item()):
             continue
@@ -705,6 +592,70 @@ def main() -> None:
     }
     write_run_meta(run_dir, run_meta)
 
+    # ------------------------------------------------------------------
+    # CLIP の特徴は **ここで 1 度だけ** 計算する。
+    #
+    # backbone は凍結されていて preprocess にランダム要素も無いため、
+    # 毎エポック・毎 head で符号化し直しても結果は同じである
+    # （詳細は feature_cache の docstring）。head は単位ベクトルの上の Linear なので、
+    # ここで作った行をそのまま全 head・全エポックで使い回せる。
+    # ------------------------------------------------------------------
+    update_job_progress(phase="encode", message="encoding images (once per run)")
+
+    # 読めない画像は**符号化の前に**外す。途中で落とすと特徴の行とラベルの行がずれ、
+    # 間違った対応で学習しても気づけない（feature_cache.usable_items）。
+    train_items_all, dropped_train = usable_items(train_items_all, dataset_root=DATASET_DIR)
+    val_items_all, dropped_val = usable_items(val_items_all, dataset_root=DATASET_DIR)
+    dropped = dropped_train + dropped_val
+    if dropped:
+        print(f"[WARN] 読めない画像を {len(dropped)} 件除外しました:")
+        for name in dropped[:10]:
+            print(f"         {name}")
+        if len(dropped) > 10:
+            print(f"         ... 他 {len(dropped) - 10} 件")
+
+    encode_kwargs = dict(
+        dataset_root=DATASET_DIR,
+        clip_preprocess=clip_preprocess,
+        clip_model=clip_model,
+        device=device,
+        batch_size=effective_batch_size,
+        num_workers=effective_num_workers,
+        pin_memory=(device.type == "cuda"),
+    )
+    encode_started = time.time()
+    train_feats = encode_features(
+        train_items_all,
+        on_progress=lambda done, total: update_job_progress(
+            phase="encode", current=done, total=total, message="encoding train images"
+        ),
+        **encode_kwargs,
+    )
+    val_feats = encode_features(
+        val_items_all,
+        on_progress=lambda done, total: update_job_progress(
+            phase="encode", current=done, total=total, message="encoding val images"
+        ),
+        **encode_kwargs,
+    )
+    if train_feats.numel() == 0 and val_feats.numel() == 0:
+        raise SystemExit(
+            "[ERROR] 符号化できる画像が 1 枚もありません。"
+            "index.json の dataset_path と dataset/ の中身を確認してください"
+        )
+    in_dim = int((train_feats if train_feats.numel() else val_feats).shape[1])
+    used_bytes = feature_memory_bytes(len(train_items_all), len(val_items_all), in_dim)
+    print(
+        f"[INFO] 特徴を符号化しました: train={len(train_items_all)} val={len(val_items_all)} "
+        f"dim={in_dim} ({used_bytes / 1024 / 1024:.1f} MB, {time.time() - encode_started:.1f} 秒)"
+    )
+    print("[INFO] 以降のエポックはこの特徴を使い回すため、画像は読み直しません")
+    if used_bytes > FEATURE_MEMORY_WARN_BYTES:
+        print(
+            f"[WARN] 特徴がメモリ上で {used_bytes / 1024 / 1024 / 1024:.1f} GB を占めます。"
+            "スワップが起きる場合は dataset を分割してください"
+        )
+
     # head ごとの学習結果（ベスト精度とエポック推移）を蓄積する。
     heads_metrics: Dict[str, Any] = {}
 
@@ -736,17 +687,23 @@ def main() -> None:
         if not classes:
             classes = collect_classes_from_items(train_items_all, head, head_type)
 
-        train_ds, train_loader, val_ds, val_loader, class_to_idx = build_dataloaders(
-            index_data=index_data,
+        # 特徴は共通なので、head ごとに変わるのは**正解と有効マスクだけ**。
+        class_to_idx = {c: i for i, c in enumerate(classes)}
+        target_kwargs = dict(
             class_head=head,
             head_type=head_type,
             head_schema=head_schema,
-            clip_preprocess=clip_preprocess,
-            batch_size=args.batch_size,
-            num_workers=effective_num_workers,
-            dataset_root=DATASET_DIR,
-            class_names=classes,
-            pin_memory=(device.type == "cuda"),
+            class_to_idx=class_to_idx,
+        )
+        train_y, train_valid = build_targets(train_items_all, **target_kwargs)
+        val_y, val_valid = build_targets(val_items_all, **target_kwargs)
+        train_loader = feature_loader(
+            train_feats, train_y, train_valid,
+            batch_size=effective_batch_size, shuffle=True,
+        )
+        val_loader = feature_loader(
+            val_feats, val_y, val_valid,
+            batch_size=effective_batch_size, shuffle=False,
         )
 
         num_classes = len(classes)
@@ -758,15 +715,6 @@ def main() -> None:
         print(f"[INFO] head_type: {head_type}")
         print(f"[INFO] num classes: {num_classes}")
 
-        # Determine embedding dim
-        with torch.no_grad():
-            dummy = torch.zeros((1, 3, 224, 224), device=device)
-            try:
-                feat = clip_model.encode_image(dummy).float()
-                in_dim = int(feat.shape[-1])
-            except Exception:
-                in_dim = 768
-
         head_model = LinearHead(in_dim=in_dim, num_classes=num_classes).to(device)
 
         # Loss
@@ -775,7 +723,7 @@ def main() -> None:
                 loss_fn = nn.BCEWithLogitsLoss()
             else:
                 pos_weight = compute_multilabel_pos_weights(
-                    train_ds.items,
+                    train_items_all,
                     head,
                     class_to_idx,
                     head_schema,
@@ -786,7 +734,7 @@ def main() -> None:
                 loss_fn = nn.CrossEntropyLoss(ignore_index=-1)
             else:
                 weights = compute_class_weights(
-                    train_ds.items,
+                    train_items_all,
                     head,
                     class_to_idx,
                     head_schema,
@@ -826,14 +774,9 @@ def main() -> None:
             last_progress_ts = 0.0
 
             for batch_i, (xb, yb, valid_mask) in enumerate(train_loader, start=1):
-                xb = xb.to(device)
                 valid_mask = valid_mask.to(device) > 0.5
-
-                with torch.no_grad():
-                    feats = clip_model.encode_image(xb).float()
-                    feats = feats / feats.norm(dim=-1, keepdim=True)
-
-                logits = head_model(feats)
+                # xb は既に符号化済みの特徴（run の最初に 1 度だけ計算した行）。
+                logits = head_model(xb.to(device))
                 if not bool(valid_mask.any().item()):
                     continue
 
@@ -891,7 +834,6 @@ def main() -> None:
                 extra={"head": head, "epoch": epoch + 1, "epochs": epochs_total, "stage": "val"},
             )
             val_loss, val_acc = eval_one_epoch(
-                model=clip_model,
                 head=head_model,
                 loader=val_loader,
                 device=device,
@@ -969,7 +911,7 @@ def main() -> None:
             # 校正は「あると良い」もの。val 画像が読めない等で全部を失うのは割に合わない。
             try:
                 val_logits, val_y, val_mask = _collect_val_logits(
-                    model=clip_model, head=head_model, loader=val_loader, device=device
+                    head=head_model, loader=val_loader, device=device
                 )
                 if val_logits.numel() and bool(val_mask.any().item()):
                     temperature = fit_temperature(
