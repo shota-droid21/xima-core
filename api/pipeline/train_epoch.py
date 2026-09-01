@@ -327,6 +327,15 @@ class LinearHead(nn.Module):
 # かえって歪む。少なすぎるときは校正しない（T=1.0 = 従来どおり）方が安全。
 MIN_VAL_FOR_TEMPERATURE = 20
 
+# 温度の許容範囲。**主な安全装置は NLL の検証**（fit_temperature 参照）で、
+# ここは最適化が明らかに発散した値を早めに落とすための粗い枠でしかない。
+#
+# 下限を 0.05 のような「常識的」な値にはしない。CLIP の linear probe は重みが小さく、
+# 実データで character が T=0.039 を必要とした（それで NLL 2.138 -> 0.538）。
+# 妥当な当てはめまで切り落とすと校正そのものが効かなくなる。
+MIN_TEMPERATURE = 0.01
+MAX_TEMPERATURE = 100.0
+
 
 @torch.no_grad()
 def _collect_val_logits(
@@ -385,8 +394,15 @@ def fit_temperature(
         loss_fn = nn.CrossEntropyLoss()
         y = targets.long()
 
+    with torch.no_grad():
+        baseline_nll = float(loss_fn(logits, y).item())
+
     log_t = torch.zeros(1, requires_grad=True)
-    optimizer = optim.LBFGS([log_t], lr=0.1, max_iter=100)
+    # line search を付けないと LBFGS が overshoot して log_t が -inf 方向へ飛ぶ。
+    # 実データで hair_color が T=2.3e-08 に落ち、NLL が 0.490 から **118,819** へ悪化した。
+    optimizer = optim.LBFGS(
+        [log_t], lr=0.1, max_iter=100, line_search_fn="strong_wolfe"
+    )
 
     def closure() -> torch.Tensor:
         optimizer.zero_grad()
@@ -402,6 +418,23 @@ def fit_temperature(
 
     temperature = float(log_t.exp().item())
     if not math.isfinite(temperature) or temperature <= 0:
+        return None
+    temperature = min(max(temperature, MIN_TEMPERATURE), MAX_TEMPERATURE)
+
+    # **要の検証。**温度は val の NLL を最小化して求めるものなので、
+    # 出発点（T=1.0）より悪い値が返ってきたら、それは当てはめの失敗である。
+    #
+    # ここを見ていなかったために、確率が 0 か 1 に振り切れた checkpoint が出荷された。
+    # そうなると閾値ごとの実測一致率が全帯で同じ値に潰れ、
+    # 「0.99 以上」を選んでも実際は 54.5% しか当たらない状態を利用者に見せてしまう。
+    # 校正できないことより、**校正したつもりで壊れている**方が危険である。
+    with torch.no_grad():
+        fitted_nll = float(loss_fn(logits / temperature, y).item())
+    if not math.isfinite(fitted_nll) or fitted_nll >= baseline_nll:
+        print(
+            f"[WARN] 温度 T={temperature:.6f} は NLL を改善しませんでした"
+            f"（{baseline_nll:.4f} -> {fitted_nll:.4f}）。校正なしで続行します"
+        )
         return None
     return temperature
 
