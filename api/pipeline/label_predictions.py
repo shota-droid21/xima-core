@@ -59,20 +59,40 @@ MULTI_LABEL_DECISION_POINT = 0.5
 class Prediction:
     """1 item・1 head 分の予測。閾値による足切りはしない。
 
-    `score` を**確信度として読んではいけない。**実データで確認したところ、
-    head は正しく分類できている（人がラベルした 185 件に対し argmax 一致率 91.4%）のに、
-    logits の幅が -0.22..0.15 しかなく、30 クラスの softmax はほぼ一様になる
-    （最大でも 0.042）。埋め込みが L2 正規化された単位ベクトルで、head の重みが小さいまま
-    学習が終わるため、**確率の絶対値に意味が無い**。
+    `confidence` と `score` の違い:
 
-    使えるのは**順位**と `margin`（1 位と 2 位の差）である。「見ないで確定してよいか」を
-    絶対確率の閾値で決める設計は、この学習設定では成立しない。
+        `score` は **1 位の確率**そのものである。`confidence` は「**この予測を人が見ずに
+        確定してよいか**」の目安で、head の型ごとに意味のある形で計算する。
+
+        - multi_class … 1 位の確率（`score` と同じ）
+        - multi_label … 全クラスの `max(p, 1-p)` の**最小値**
+
+        multi_label で `score`（1 位の確率）を閾値にしてはいけない。multi_label の予測は
+        「どのクラスを付けるか」という per-class の判定の集合であり、1 位が確実でも
+        別のクラスが 0.5 付近で揺れていれば**集合としては間違っている**。いちばん自信の無い
+        判定に引きずられるべきなので最小値を採る。
+
+    履歴（`score` を確信度として読めなかった時期がある）:
+
+        以前は既定の学習率が低すぎて（1e-4）、head の重みが初期値から育たないまま学習が
+        終わっていた。埋め込みは L2 正規化された単位ベクトルなので logits の幅は重みの
+        大きさだけで決まり、30 クラスの softmax は最大 0.042 にしかならなかった
+        （それでいて argmax の一致率は 91.4% あった）。
+
+        現在は学習率を上げ、val で温度スケーリングを当てはめて checkpoint に保存し、
+        推論時に logits をそれで割る。**確率の絶対値は意味を持つ**（実測で val の一致率は
+        0.5 以上で 0.93、0.8 以上で 1.00）ので、閾値で「見ずに確定する帯」を切ってよい。
+
+        ただし**当てはまるのはその run で学習した head だけ**である。温度を持たない古い
+        checkpoint は T=1.0 として扱われ、確率は校正されていない。実際に何 % 当たるかは
+        `prediction_reliability.py` が val で実測し、UI はその実測値を見せて閾値を選ばせる。
     """
 
     value: Any                  # multi_class は str、multi_label は list[str]
-    score: float                # 1 位の確率。**絶対値に意味は無い**（上記）
+    score: float                # 1 位の確率
     margin: float               # 1 位と 2 位の差。クラス数に依存しないぶん比較しやすい
     top: List[Dict[str, Any]]   # 上位クラスと確率（tooltip 用）
+    confidence: float = 0.0     # **この予測をそのまま確定してよいか**の目安（下記）
 
 
 @dataclass
@@ -120,6 +140,19 @@ def has_label(item: Mapping[str, Any], head: str) -> bool:
     return True
 
 
+def multi_label_confidence(scores: Mapping[str, float]) -> float:
+    """multi_label の予測を**集合として**確定してよいかの目安。
+
+    per-class の判定 1 つ 1 つについて `max(p, 1-p)`（＝その判定がどれだけ振り切れているか）
+    を求め、その**最小値**を返す。1 つでも 0.5 付近で揺れているクラスがあれば、
+    集合としては間違っている可能性が高いため、いちばん弱い判定に合わせる。
+
+    クラスが 1 つも無いときは 0.0（＝どの閾値でも一括確定の対象にしない）。
+    """
+    decisions = [max(float(v), 1.0 - float(v)) for v in scores.values()]
+    return min(decisions) if decisions else 0.0
+
+
 def prediction_from_scores(
     scores: Mapping[str, float], *, head_type: str
 ) -> Optional[Prediction]:
@@ -142,11 +175,22 @@ def prediction_from_scores(
     if head_type == "multi_label":
         selected = [k for k, v in ranked if v >= MULTI_LABEL_DECISION_POINT]
         return Prediction(
-            value=selected, score=ranked[0][1], margin=margin, top=top
+            value=selected,
+            score=ranked[0][1],
+            margin=margin,
+            top=top,
+            # 1 位の確率ではなく、いちばん自信の無い per-class 判定を採る（Prediction の docstring）
+            confidence=multi_label_confidence(scores),
         )
 
     best_class, best_score = ranked[0]
-    return Prediction(value=best_class, score=best_score, margin=margin, top=top)
+    return Prediction(
+        value=best_class,
+        score=best_score,
+        margin=margin,
+        top=top,
+        confidence=best_score,
+    )
 
 
 def record_prediction(
@@ -170,6 +214,8 @@ def record_prediction(
         "value": prediction.value,
         "score": round(float(prediction.score), 6),
         "margin": round(float(prediction.margin), 6),
+        # 一括確定の閾値はこちらを見る。score との違いは Prediction の docstring
+        "confidence": round(float(prediction.confidence), 6),
         "top": prediction.top,
         "run": run_name,
         "at": now or time.strftime("%Y-%m-%dT%H:%M:%S"),

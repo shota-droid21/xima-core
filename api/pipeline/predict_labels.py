@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -56,6 +57,12 @@ from label_predictions import (  # noqa: E402
     plan_predictions,
     record_prediction,
     write_json_atomic,
+)
+from prediction_reliability import (  # noqa: E402
+    agreement_points,
+    build_reliability,
+    collect_samples,
+    val_source_paths,
 )
 
 
@@ -152,6 +159,9 @@ def main() -> None:
     schema_path = Path(args.schema).resolve() if args.schema else (
         label_input_dir / "label_schema.json"
     )
+    # 一致率を val だけで測るための対象。無ければ人がラベルした全件に落とす
+    # （楽観側に振れるので、その旨は basis として UI に渡す）。
+    val_paths = val_source_paths(label_input_dir.parent / "dataset" / "index.json")
 
     update_job_progress(phase="load", message="loading labels and checkpoints")
 
@@ -175,6 +185,7 @@ def main() -> None:
     print(f"[INFO] 対象 head: {[h for h, _, _ in heads]}")
 
     per_head: Dict[str, Dict[str, int]] = {}
+    reliability_heads: Dict[str, Dict[str, Any]] = {}
     total_recorded = 0
 
     for hi, (head, head_type, ckpt) in enumerate(heads):
@@ -235,6 +246,30 @@ def main() -> None:
             head_type=head_type,
             report=head_report,
         )
+
+        # 閾値ごとの実測一致率。**候補を記録する前**に、いま計算した予測から測る。
+        # 一括確定ダイアログはこの表だけを見て閾値を選ばせるので、
+        # ここで測らないと利用者は根拠のない数字を選ぶことになる。
+        confidence_by_file_id = {}
+        predicted_by_file_id = {}
+        for item, prediction in planned:
+            fid = str(item.get("file_id") or "")
+            confidence_by_file_id[fid] = float(prediction.confidence)
+            predicted_by_file_id[fid] = prediction.value
+        samples = collect_samples(
+            items,
+            head=head,
+            head_type=head_type,
+            confidence_by_file_id=confidence_by_file_id,
+            predicted_by_file_id=predicted_by_file_id,
+            limit_to_paths=val_paths or None,
+        )
+        reliability_heads[head] = {
+            "head_type": head_type,
+            "n": len(samples),
+            "points": agreement_points(samples),
+        }
+
         if not args.dry_run:
             for item, prediction in planned:
                 record_prediction(
@@ -253,6 +288,18 @@ def main() -> None:
             f"削除対象 {head_report.skipped_deleted} / "
             f"埋め込み無し {head_report.skipped_no_embedding}"
         )
+        if samples:
+            basis_label = "val" if val_paths else "ラベル済み全件（train を含むため高めに出ます）"
+            print(f"[INFO] {head}: 閾値ごとの実測一致率（{basis_label} {len(samples)} 件）")
+            for pt in reliability_heads[head]["points"]:
+                if not pt["n"]:
+                    continue
+                print(
+                    f"         >= {pt['threshold']:.2f}  {pt['n']:4d} 件  "
+                    f"一致率 {pt['agreement']:.3f}"
+                )
+        else:
+            print(f"[INFO] {head}: 一致率を測れる item がありません（一括確定は使えません）")
         update_job_progress(
             phase="infer", current=hi + 1, total=len(heads), message=f"predicted {head}"
         )
@@ -262,6 +309,19 @@ def main() -> None:
     elif total_recorded == 0:
         print("[INFO] 候補を付けられる item がありませんでした。labels.json は変更していません")
     else:
+        if reliability_heads:
+            # item ごとの値ではなく run 全体の性質なので meta に置く。
+            # app は labels.json を読むだけで一括確定の判断材料を得られる。
+            meta = data.get("meta")
+            if not isinstance(meta, dict):
+                meta = {}
+            meta["prediction_reliability"] = build_reliability(
+                reliability_heads,
+                run_name=run_dir.name,
+                basis="val" if val_paths else "labeled",
+                now=time.strftime("%Y-%m-%dT%H:%M:%S"),
+            )
+            data["meta"] = meta
         # **スナップショットは取らない。**labels（確定値）を変えていないため、
         # 履歴を残す意味が薄く、実行のたびに「変化のない版」で復元候補が埋まる。
         # 書き込み自体は tmp + fsync + replace で壊さない。
