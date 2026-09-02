@@ -17,7 +17,7 @@ API_ROOT = Path(__file__).resolve().parents[1]
 if str(API_ROOT) not in sys.path:
     sys.path.insert(0, str(API_ROOT))
 
-from pipeline.run_meta import build_head_metrics
+from pipeline.run_meta import build_head_metrics, diagnose_training
 
 
 def test_build_head_metrics_captures_best_and_history() -> None:
@@ -124,3 +124,63 @@ def test_history_without_val_loss_is_tolerated():
         head_type="multi_class", num_classes=30,
         epoch_history=[{"epoch": 0, "val_acc": 0.5}], best_val_loss=None,
     ) == []
+
+
+# ---------------------------------------------------------------------------
+# multi_label の完全一致率（val_exact_match）
+#
+# val_acc は multi_label では per-element（クラス枠ごと）である。11 クラスで
+# 1 画像あたり平均 1.50 個が正なら、**「1 つも付けない」と答えるだけで 0.864** になる。
+# 一括確定が書くのは集合そのものなので、判断は完全一致で行う必要がある。
+# ---------------------------------------------------------------------------
+
+
+def test_build_head_metrics_keeps_exact_match_for_multi_label():
+    best = {"epoch": 3, "val_acc": 0.93, "val_loss": 0.21, "val_exact_match": 0.50}
+    out = build_head_metrics("multi_label", [{"epoch": 1}], best)
+    assert out["best"]["val_exact_match"] == 0.50
+    assert out["best"]["val_acc"] == 0.93
+
+
+def test_build_head_metrics_omits_exact_match_for_multi_class():
+    """multi_class では val_acc と同義なので出さない。無いことに意味を持たせる。"""
+    best = {"epoch": 3, "val_acc": 0.93, "val_loss": 0.21, "val_exact_match": None}
+    out = build_head_metrics("multi_class", [{"epoch": 1}], best)
+    assert "val_exact_match" not in out["best"]
+
+
+def test_diagnose_warns_when_per_element_hides_a_weak_multi_label_head():
+    problems = diagnose_training(
+        head_type="multi_label",
+        num_classes=11,
+        epoch_history=[{"val_loss": 0.30}, {"val_loss": 0.25}, {"val_loss": 0.21}],
+        best_val_loss=0.21,
+        best_val_acc=0.93,
+        best_exact_match=0.50,
+    )
+    assert any("完全に一致した割合" in p for p in problems)
+
+
+def test_diagnose_silent_when_exact_match_tracks_accuracy():
+    problems = diagnose_training(
+        head_type="multi_label",
+        num_classes=11,
+        epoch_history=[{"val_loss": 0.30}, {"val_loss": 0.25}, {"val_loss": 0.21}],
+        best_val_loss=0.21,
+        best_val_acc=0.93,
+        best_exact_match=0.88,
+    )
+    assert not any("完全に一致した割合" in p for p in problems)
+
+
+def test_diagnose_ignores_exact_match_for_multi_class():
+    """multi_class に完全一致の概念は無いので、渡されても警告しない。"""
+    problems = diagnose_training(
+        head_type="multi_class",
+        num_classes=30,
+        epoch_history=[{"val_loss": 1.0}, {"val_loss": 0.8}, {"val_loss": 0.7}],
+        best_val_loss=0.7,
+        best_val_acc=0.93,
+        best_exact_match=0.10,
+    )
+    assert not any("完全に一致した割合" in p for p in problems)

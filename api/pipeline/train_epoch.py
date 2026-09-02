@@ -335,15 +335,29 @@ def eval_one_epoch(
     device: torch.device,
     head_type: str,
     loss_fn: nn.Module,
-) -> Tuple[float, float]:
+) -> Tuple[float, float, Optional[float]]:
     """loader は **符号化済みの特徴**を出す（`feature_cache.feature_loader`）。
 
     CLIP はここには現れない。特徴は run の最初に 1 度だけ計算される。
+
+    返り値は (loss, acc, exact_match)。
+
+    `acc` は multi_label では **per-element** である（クラス枠の数で割る）。
+    この値だけを見てはいけない。実データの hair_color は 11 クラスで 1 画像あたり
+    平均 1.50 個が正なので、**「1 つも付けない」と答えるだけで 0.864** になる。
+    そこで multi_label では `exact_match`（集合が完全に一致した画像の割合）も返す。
+    同じ状態の exact_match は 0.000 であり、こちらが実態を表す。
+
+    一括確定が `labels` へ書くのは集合そのものなので、「見ずに確定してよいか」を
+    予測するのは exact_match の方である（`prediction_reliability.is_agreement` も
+    集合の完全一致で測っている）。multi_class では acc と同義なので None を返す。
     """
     head.eval()
 
     total_units = 0
     correct_units = 0
+    total_rows = 0
+    exact_rows = 0
     loss_sum = 0.0
     eval_steps = 0
 
@@ -363,6 +377,9 @@ def eval_one_epoch(
             pred = (probs >= 0.5).float()
             total_units += int(yb_valid.numel())
             correct_units += int((pred == yb_valid).sum().item())
+            # 画像単位。1 クラスでも外していればその画像は不一致。
+            total_rows += int(yb_valid.shape[0])
+            exact_rows += int((pred == yb_valid).all(dim=-1).sum().item())
         else:
             yb = yb.to(device).long()
             logits_valid = logits[valid_mask]
@@ -377,7 +394,10 @@ def eval_one_epoch(
 
     avg_loss = loss_sum / max(eval_steps, 1)
     acc = (correct_units / total_units) if total_units > 0 else 0.0
-    return avg_loss, acc
+    exact = None
+    if head_type == "multi_label":
+        exact = (exact_rows / total_rows) if total_rows > 0 else 0.0
+    return avg_loss, acc, exact
 
 
 def main() -> None:
@@ -845,7 +865,7 @@ def main() -> None:
                 message=f"validating {head} (epoch {epoch+1}/{epochs_total})",
                 extra={"head": head, "epoch": epoch + 1, "epochs": epochs_total, "stage": "val"},
             )
-            val_loss, val_acc = eval_one_epoch(
+            val_loss, val_acc, val_exact = eval_one_epoch(
                 head=head_model,
                 loader=val_loader,
                 device=device,
@@ -853,19 +873,24 @@ def main() -> None:
                 loss_fn=loss_fn,
             )
 
+            # multi_label は per-element の acc だけ出すと実態より良く見えるので、
+            # 集合の完全一致も並べる（eval_one_epoch の docstring）。
+            exact_note = f" val_exact={val_exact:.4f}" if val_exact is not None else ""
             print(
                 f"[EPOCH] head={head} epoch={epoch+1}/{args.epochs} "
-                f"train_loss={train_loss:.4f} val_loss={val_loss:.4f} val_acc={val_acc:.4f}"
+                f"train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
+                f"val_acc={val_acc:.4f}{exact_note}"
             )
 
-            epoch_history.append(
-                {
-                    "epoch": epoch + 1,
-                    "train_loss": float(train_loss),
-                    "val_loss": float(val_loss),
-                    "val_acc": float(val_acc),
-                }
-            )
+            record = {
+                "epoch": epoch + 1,
+                "train_loss": float(train_loss),
+                "val_loss": float(val_loss),
+                "val_acc": float(val_acc),
+            }
+            if val_exact is not None:
+                record["val_exact_match"] = float(val_exact)
+            epoch_history.append(record)
 
             # basic progress update
             update_job_progress(
@@ -878,6 +903,7 @@ def main() -> None:
                     "head_type": head_type,
                     "val_acc": val_acc,
                     "val_loss": val_loss,
+                    "val_exact_match": val_exact,
                 },
             )
 
@@ -909,6 +935,7 @@ def main() -> None:
                     "epoch": epoch,
                     "val_acc": val_acc,
                     "val_loss": val_loss,
+                    "val_exact_match": val_exact,
                 }
                 epochs_since_improve = 0
             else:
@@ -990,6 +1017,8 @@ def main() -> None:
             num_classes=len(classes),
             epoch_history=epoch_history,
             best_val_loss=(best_state or {}).get("val_loss"),
+            best_val_acc=(best_state or {}).get("val_acc"),
+            best_exact_match=(best_state or {}).get("val_exact_match"),
         )
         for problem in problems:
             print(f"[WARN] {head}: {problem}")

@@ -34,14 +34,20 @@ def build_head_metrics(
     学習が 1 度も行われなかった場合（epochs=0 等）は best を None 埋めする。
     """
     best_epoch = (int(best_state.get("epoch", 0)) + 1) if best_state else None
+    best: Dict[str, Any] = {
+        "epoch": best_epoch,
+        "val_acc": float(best_state["val_acc"]) if best_state else None,
+        "val_loss": float(best_state["val_loss"]) if best_state else None,
+    }
+    # multi_label のときだけ入る（multi_class では val_acc と同義なので出さない）。
+    # 無いことに意味があるので、None を入れて「測ったが 0 だった」と混同させない。
+    exact = (best_state or {}).get("val_exact_match")
+    if exact is not None:
+        best["val_exact_match"] = float(exact)
     return {
         "head_type": head_type,
         "epochs_trained": len(epoch_history),
-        "best": {
-            "epoch": best_epoch,
-            "val_acc": float(best_state["val_acc"]) if best_state else None,
-            "val_loss": float(best_state["val_loss"]) if best_state else None,
-        },
+        "best": best,
         "history": list(epoch_history),
     }
 
@@ -67,12 +73,22 @@ def chance_loss(head_type: str, num_classes: int) -> Optional[float]:
     return math.log(float(num_classes))
 
 
+# multi_label で「per-element は高いのに集合が当たっていない」と判定する差。
+#
+# per-element の acc は、クラス数が多く 1 画像あたりの正が少ないほど自動的に高くなる
+# （11 クラス・平均 1.50 個なら「1 つも付けない」で 0.864）。この差が開いているときは、
+# 表示されている acc を実力と読んではいけない。
+EXACT_MATCH_GAP = 0.2
+
+
 def diagnose_training(
     *,
     head_type: str,
     num_classes: int,
     epoch_history: List[Dict[str, Any]],
     best_val_loss: Optional[float],
+    best_val_acc: Optional[float] = None,
+    best_exact_match: Optional[float] = None,
 ) -> List[str]:
     """**学習が成立したか**を loss の水準と推移から判定し、問題を文章で返す。
 
@@ -107,6 +123,20 @@ def diagnose_training(
             "予測の確率はほぼ一様になります（正解率が高く見えても、"
             "多数派クラスを当てているだけのことがあります）。"
             "学習率を上げるか、エポック数を増やしてください。"
+        )
+
+    if (
+        head_type == "multi_label"
+        and best_val_acc is not None
+        and best_exact_match is not None
+        and best_val_acc - best_exact_match > EXACT_MATCH_GAP
+    ):
+        problems.append(
+            f"val_acc {best_val_acc:.3f} は per-element（クラス枠ごと）の一致率で、"
+            f"**画像単位で集合が完全に一致した割合は {best_exact_match:.3f}** です。"
+            "クラス数が多く 1 画像あたりの正が少ないほど per-element は自動的に高く出ます"
+            "（極端な場合、1 つも付けないと答えるだけで高い値になります）。"
+            "一括確定が書くのは集合そのものなので、判断は完全一致の方で行ってください。"
         )
 
     if len(losses) >= 3:
