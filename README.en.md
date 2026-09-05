@@ -27,15 +27,18 @@ has no network access, fetch the weights separately and place them in that cache
 - Exposes a local HTTP API (FastAPI)
 - Uses the **filesystem as the source of truth**
 - Can be used via **API / CLI only** (no UI required)
-
-xima-core is designed for ML engineers, individual developers, and hobbyists running
-experiments locally.
+- Saves each trained head as a PyTorch checkpoint that also carries the class order,
+  the head type, the encoder name, and the calibrated temperature — readable without
+  xima running
 
 ## What xima-core is NOT
 
 - A hosted or managed training platform
 - A no-code ML tool
 - A dataset marketplace or model registry
+- A serving API. By default it binds to loopback and is meant for working on your own
+  machine
+- A trainer for CLIP itself. Only the linear head on top of its embeddings is trained
 
 The scope is deliberately narrow: label images, build a dataset, train a linear head
 on CLIP embeddings, run inference. Anything past that is out of scope.

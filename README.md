@@ -25,17 +25,20 @@ CLIP 重みのダウンロード**です（`~/.cache/clip` にキャッシュさ
 - ラベルからの**学習用データセット生成**
 - **CLIP の埋め込みに線形分類器を載せた学習**と、検証精度の確認
 - 未ラベル画像への**一括推論**（クラスごとのスコアを JSON で書き出します）
+- 学習した head を、**クラス順・エンコーダ名・温度と同じファイルに**保存
+  （[学習結果として残るもの](#学習結果として残るもの)）
 - 自分のマシン（CPU / GPU）で動作
 - **ファイルシステムを正本**とする
 - **API / CLI だけで完結**できる（UI は必須ではありません）
-
-想定している利用者は、ML エンジニア、個人開発者、手元で実験を回す人です。
 
 ## できないこと
 
 - ホスト型・マネージドの学習プラットフォームではありません
 - ノーコード ML ツールではありません
 - データセットの取引所でもモデルレジストリでもありません
+- **本番のリクエストを受ける推論サーバではありません。** 既定ではループバックにバインドする
+  作業用の API です
+- **CLIP 自体は学習しません。** 学習するのは、その埋め込みに載せた線形ヘッドだけです
 
 **スコープは意図的に狭くしてあります。** 画像にラベルを付け、データセットを作り、CLIP の
 埋め込みに線形ヘッドを学習させ、推論する。ここから先は対象外です。
@@ -54,6 +57,42 @@ CLIP 重みのダウンロード**です（`~/.cache/clip` にキャッシュさ
    `experiments/<name>/eval/scores_<run>.json` に書き出せます
 
 いずれの段階でも、生成物はすべて `workspaces/` 配下のファイルとして残ります。
+
+---
+
+## 学習結果として残るもの
+
+1 回の学習（`train_epoch`）は `experiments/<name>/models/run_<timestamp>/` を 1 つ作ります。
+
+```
+models/run_20260101_120000/
+├─ shape_linear.pt    # head ごとに 1 ファイル
+└─ run_meta.json
+```
+
+`<head>_linear.pt` は PyTorch の checkpoint です。**重みだけでなく、その重みを使うのに必要な
+情報が同じファイルに入っています。**
+
+| キー | 中身 |
+| --- | --- |
+| `state_dict` | 線形ヘッドの重み |
+| `classes` / `class_to_idx` | クラス名と、その並び順 |
+| `class_head` / `head_type` | head 名と種別（`multi_class` / `multi_label`） |
+| `clip_model_name` | 埋め込みを作ったエンコーダ（例 `ViT-L/14@336px`） |
+| `temperature` | 温度校正の値。校正できなかった場合は `null` で、推論では `1.0` として扱われます（argmax は変わりません） |
+
+```python
+import torch
+ckpt = torch.load("models/run_20260101_120000/shape_linear.pt", map_location="cpu")
+ckpt["classes"], ckpt["clip_model_name"], ckpt["head_type"]
+```
+
+`run_meta.json` には、学習に使ったエンコーダと head、参照した index / schema のパス、
+head ごとの `val_acc` / `val_loss` の推移が入ります。推論スコアは
+`experiments/<name>/eval/scores_<run>.json` に書き出せます。
+
+**これらのファイルは xima を起動していなくても読めます。** 一方で、ONNX への書き出しや、
+実行環境ごと 1 つにまとめた配布形式は、まだありません。
 
 ---
 
