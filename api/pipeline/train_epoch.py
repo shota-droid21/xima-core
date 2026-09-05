@@ -621,6 +621,13 @@ def main() -> None:
         "schema_path": str(schema_path) if schema_path else None,
         "clip_model_name": args.clip_model,
         "heads": heads_to_train,
+        # この run が実際に使った学習設定。UI は「前回の run」の隣にこれを出す。
+        # 記録が無いと、画面がフォームの現在値を前回の設定として見せてしまう。
+        "train_args": {
+            "epochs": int(args.epochs),
+            "lr": float(args.lr),
+            "batch_size": int(args.batch_size),
+        },
     }
     write_run_meta(run_dir, run_meta)
 
