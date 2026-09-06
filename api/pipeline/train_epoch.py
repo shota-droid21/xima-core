@@ -480,7 +480,7 @@ def main() -> None:
         "--class-head",
         type=str,
         default=None,
-        help="学習に使用する head id (デフォルト: index.json の meta.class_head か 'character')",
+        help="学習に使用する head id (未指定ならスキーマか index.json の meta.class_head から決める)",
     )
     parser.add_argument(
         "--heads",
@@ -554,7 +554,10 @@ def main() -> None:
         effective_num_workers = 0
 
     meta = index_data.get("meta", {}) or {}
-    meta_default_head = meta.get("class_head", "character")
+    # index.json に記録されていれば最後の手掛かりとして使う。
+    # 以前はここに特定の head 名を既定として置いていたため、その名前を持たない
+    # 利用者では「存在しない head を学習しようとする」状態になっていた（#251 C-2）。
+    meta_default_head = str(meta.get("class_head") or "").strip() or None
 
     schema_path: Optional[Path] = None
     if args.schema:
@@ -594,10 +597,22 @@ def main() -> None:
             for hid, h in schema_head_map.items()
             if canonical_head_type(h.get("type")) != "split"
         ]
-        if not heads_to_train:
+        if not heads_to_train and meta_default_head:
             heads_to_train = [meta_default_head]
-    else:
+    elif meta_default_head:
         heads_to_train = [meta_default_head]
+    else:
+        heads_to_train = []
+
+    if not heads_to_train:
+        # 推測で head 名を作らない。何を学習するのか決まらないまま進むと、
+        # 「存在しない head」で落ちて原因が分かりにくい。ここで理由ごと止める。
+        raise SystemExit(
+            "[ERROR] 学習する head が決まりませんでした。次のいずれかを指定してください:\n"
+            "  --heads <id,...>            学習する head を直接指定する\n"
+            "  --class-head <id>           head を 1 つだけ指定する\n"
+            "  --schema <label_schema.json>  split 以外の head を持つスキーマを渡す"
+        )
 
     print(f"[INFO] index.json: {index_path}")
     print(f"[INFO] heads to train: {heads_to_train}")

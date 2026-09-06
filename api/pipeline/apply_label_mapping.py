@@ -59,10 +59,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--class-head",
-        default="character",
+        default=None,
         help=(
             "meta に記録するデフォルト head 名 (フィルタには使わない)。\n"
-            "train_epoch 側で --class-head 未指定時のデフォルト候補として利用。"
+            "train_epoch 側で --heads / --class-head / スキーマのいずれも無いときの\n"
+            "最後の手掛かりとして使われる。未指定なら記録しない。"
         ),
     )
 
@@ -122,7 +123,7 @@ def main() -> None:
     print(f"[INFO] labels: {labels_path}")
     print(f"[INFO] root_dir: {root_dir}")
     print(f"[INFO] dataset_root: {dataset_root}")
-    print(f"[INFO] class_head(meta用): {class_head}")
+    print(f"[INFO] class_head(meta用): {class_head if class_head else '(未指定)'}")
     print(f"[INFO] ラベル件数: {len(items)}")
 
     update_job_progress(
