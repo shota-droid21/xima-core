@@ -12,11 +12,18 @@ if str(API_ROOT) not in sys.path:
     sys.path.insert(0, str(API_ROOT))
 
 from pipeline.clustering import (  # noqa: E402
+    MAX_AUTO_K,
     assemble_clusters,
     auto_k,
     kmeans,
     run_clustering,
 )
+
+# `run_clustering` は numpy が在れば高速路に回る（#272）。どちらの経路でも
+# 同じ結果になることを担保したいので、実行環境に関わらず純 Python 経路
+# （use_numpy=False）を必ず 1 度は通す。両経路の一致そのものは
+# test_clustering_fast.py で突き合わせる。
+BACKENDS = [False, None]
 
 
 def _three_blobs():
@@ -34,7 +41,9 @@ def test_auto_k_scales_with_n():
     assert auto_k(2) == 2
     assert auto_k(36) >= 2
     # 上限で頭打ちになる
-    assert auto_k(100000) <= 12
+    assert auto_k(100000) == MAX_AUTO_K
+    # 実データ規模では上限に当たらず、まとまりが粗くなりすぎない（#272）
+    assert auto_k(3489) == 42
 
 
 def test_kmeans_recovers_well_separated_blobs():
@@ -84,9 +93,10 @@ def test_assemble_orders_by_size_and_puts_representative_first():
     assert clusters[0]["members"][0] == clusters[0]["representative"]
 
 
-def test_run_clustering_auto_k_groups_blobs():
+@pytest.mark.parametrize("use_numpy", BACKENDS)
+def test_run_clustering_auto_k_groups_blobs(use_numpy):
     vectors = _three_blobs()
-    result = run_clustering(vectors, k=3, seed=0)
+    result = run_clustering(vectors, k=3, seed=0, use_numpy=use_numpy)
 
     assert result["k"] == 3
     assert sum(c["size"] for c in result["clusters"]) == len(vectors)
@@ -95,13 +105,15 @@ def test_run_clustering_auto_k_groups_blobs():
     assert sorted(seen) == list(range(len(vectors)))
 
 
-def test_run_clustering_k_is_clamped_to_n():
+@pytest.mark.parametrize("use_numpy", BACKENDS)
+def test_run_clustering_k_is_clamped_to_n(use_numpy):
     vectors = [[0.0], [1.0], [2.0]]
-    result = run_clustering(vectors, k=99)
+    result = run_clustering(vectors, k=99, use_numpy=use_numpy)
     assert result["k"] == 3
     assert len(result["clusters"]) == 3
 
 
-def test_run_clustering_empty():
-    result = run_clustering([])
+@pytest.mark.parametrize("use_numpy", BACKENDS)
+def test_run_clustering_empty(use_numpy):
+    result = run_clustering([], use_numpy=use_numpy)
     assert result["clusters"] == []

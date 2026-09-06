@@ -6,3 +6,7 @@
 pytest>=8.0
 # FastAPI TestClient は httpx を必要とする（starlette.testclient の実行時依存）。
 httpx>=0.27
+# クラスタリングは numpy が在れば高速路を使う（#272）。実運用が通る経路なので、
+# CI でも純 Python 経路と結果が一致することを確かめられるようにする。
+# torch / CLIP とは違い単体で軽く、これ 1 つで ML 依存が増えるわけではない。
+numpy>=1.26

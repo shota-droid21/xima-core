@@ -6,7 +6,8 @@ UI 側はこの結果を使って「クラスタ単位でまとめてラベル�
 
 依存の切り分け:
 
-- クラスタリングの中核ロジックは torch / numpy 非依存の `pipeline.clustering` にある。
+- クラスタリングの中核ロジックは `pipeline.clustering` にある。純 Python 実装が
+  常に在り、numpy が使える実行環境では同手順の高速路に回る（#272）。
 - 本モジュールは行列（`embeddings.npy`）の読み込みにのみ numpy を使うが、
   **import は関数内に閉じ込める**。これにより CI（numpy 無し）でも、ローダを
   スタブ化すればルーターを結合テストできる。
@@ -70,10 +71,15 @@ def _resolve_clip_model(cache_root: Path, requested: Optional[str]) -> str:
 
 def _load_embeddings(
     cache_dir: Path,
-) -> Optional[Tuple[List[Dict[str, Any]], List[List[float]]]]:
+) -> Optional[Tuple[List[Dict[str, Any]], Any]]:
     """index.json + embeddings.npy を読み、(items, vectors) を返す。
 
     キャッシュが無ければ None（＝呼び出し側で 409）。numpy はここでのみ使う。
+
+    vectors は **numpy の行列のまま返す**。以前は 1 行ずつ Python の list に
+    落としていたが、クラスタリング側も numpy で計算するようになったため
+    （#272）、変換して戻す意味が無い。テストでは本関数をスタブ化するため、
+    list of list を返しても後段はそのまま動く。
     """
     index = load_index(cache_dir)
     if not index:
@@ -88,13 +94,10 @@ def _load_embeddings(
     if matrix.ndim != 2:
         raise ValueError("embeddings matrix must be 2D")
 
-    vectors: List[List[float]] = []
-    for it in items:
-        row = int(it.get("row", -1))
-        if row < 0 or row >= matrix.shape[0]:
-            raise ValueError("embeddings index/matrix row mismatch")
-        vectors.append([float(x) for x in matrix[row].tolist()])
-    return items, vectors
+    rows = [int(it.get("row", -1)) for it in items]
+    if any(row < 0 or row >= matrix.shape[0] for row in rows):
+        raise ValueError("embeddings index/matrix row mismatch")
+    return items, matrix[rows]
 
 
 def _load_schema(cfg, workspace: str, experiment: str) -> Dict[str, Any]:
@@ -213,13 +216,18 @@ def create_clustering_router(config_manager: ConfigManager) -> APIRouter:
                 labeled = _labeled_file_ids(
                     cfg, workspace, experiment, resolved_head
                 )
-                kept = [
-                    (it, vec)
-                    for it, vec in zip(items, vectors)
+                keep = [
+                    idx
+                    for idx, it in enumerate(items)
                     if str(it.get("file_id") or "") not in labeled
                 ]
-                items = [it for it, _ in kept]
-                vectors = [vec for _, vec in kept]
+                items = [items[idx] for idx in keep]
+                # vectors は numpy 行列でも list でも同じ形で絞れるようにする。
+                vectors = (
+                    vectors[keep]
+                    if hasattr(vectors, "shape")
+                    else [vectors[idx] for idx in keep]
+                )
 
         result = run_clustering(vectors, k=k, seed=seed)
 
