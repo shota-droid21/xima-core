@@ -81,7 +81,7 @@ def test_multi_label_all_zero_model_is_not_selected():
 
     val_loss で選べば採用されない。
     """
-    # 実測（hair_color / 11 クラス・1 画像あたり平均 1.50 個が正）で観測した形。
+    # 実測（11 クラス・1 画像あたり平均 1.50 個が正の head）で観測した形。
     # 何も付けない状態が per-element 0.864。予測を始めると誤検出が出て一時的に下がり、
     # 学習が進んでから追い抜く。val_acc 基準はその谷を「改善なし」と数えて打ち切る。
     history = [

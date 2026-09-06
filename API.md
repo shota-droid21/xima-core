@@ -373,7 +373,7 @@ curl http://127.0.0.1:27801/workspaces/ws_test/experiments/exp1/jobs/<JOB_ID>/lo
 
 補足:
 
-- `train_epoch` は `args.raw_args`（例: `"--heads character,concept_color --epochs 40 ..."`）で任意の CLI オプションを渡せます。
+- `train_epoch` は `args.raw_args`（例: `"--heads shape,color --epochs 40 ..."`）で任意の CLI オプションを渡せます。
 
 ## 運用上の注意
 

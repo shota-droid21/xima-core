@@ -3,8 +3,8 @@
 なぜ要るか:
 
     一括確定は「**この確率以上なら人が見ずに確定してよい**」という操作である。
-    ところが適切な閾値は head ごとに全く違う。実データ（3 head・約 670 件ずつ）では、
-    0.9 以上に乗るのは character が 34 件、hair_color が **0 件**、eye_color が 1 件だった。
+    ところが適切な閾値は head ごとに全く違う。内部データ（3 head・約 670 件ずつ）では、
+    0.9 以上に乗るのが 34 件・**0 件**・1 件と head ごとにばらついた。
     共通の閾値を 1 つ置くと、head によっては 1 件も確定できないか、逆に当たらない帯まで
     確定してしまう。
 
@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 # UI に出す閾値の刻み。細かくしても選ぶ側が判断できず、粗すぎると
-# hair_color のように上の帯が空の head で選択肢が無くなる。
+# 上の帯が空の head（0.9 以上が 1 件も無い）で選択肢が無くなる。
 THRESHOLDS: Tuple[float, ...] = (0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99)
 
 
@@ -85,7 +85,7 @@ def agreement_points(
     """(confidence, 一致したか) の列から、閾値ごとの件数と一致率を出す。
 
     件数 0 の閾値も **落とさずに残す。**「その帯には 1 件も無い」こと自体が
-    利用者の判断材料になる（hair_color の 0.9 以上が 0 件だったように、
+    利用者の判断材料になる（0.9 以上が 0 件という head が実際にあったように、
     選んでも何も起きない閾値を選ばせないため）。
     """
     collected = [(float(c), bool(ok)) for c, ok in samples]

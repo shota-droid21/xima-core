@@ -266,9 +266,9 @@ def fit_temperature(
         T は logits を割るだけのスカラーなので **argmax を変えない**。
         つまり正解率は 1 ミリも動かさずに確率だけを校正できる。
 
-        実測（poc_ws・val 64〜88 件）:
-            character  確信度 0.116 -> 0.784   ECE 0.816 -> 0.148
-            eye_color  確信度 0.200 -> 0.604   ECE 0.472 -> 0.090
+        実測（内部データ・val 64〜88 件）。head を 2 つ挙げる:
+            head A  確信度 0.116 -> 0.784   ECE 0.816 -> 0.148
+            head B  確信度 0.200 -> 0.604   ECE 0.472 -> 0.090
         いずれも argmax は完全に不変だった。
 
     返り値が None のときは校正しない（呼び出し側は T=1.0 として扱う）。
@@ -287,7 +287,7 @@ def fit_temperature(
 
     log_t = torch.zeros(1, requires_grad=True)
     # line search を付けないと LBFGS が overshoot して log_t が -inf 方向へ飛ぶ。
-    # 実データで hair_color が T=2.3e-08 に落ち、NLL が 0.490 から **118,819** へ悪化した。
+    # 内部データのある head で T=2.3e-08 に落ち、NLL が 0.490 から **118,819** へ悪化した。
     optimizer = optim.LBFGS(
         [log_t], lr=0.1, max_iter=100, line_search_fn="strong_wolfe"
     )
@@ -343,7 +343,7 @@ def eval_one_epoch(
     返り値は (loss, acc, exact_match)。
 
     `acc` は multi_label では **per-element** である（クラス枠の数で割る）。
-    この値だけを見てはいけない。実データの hair_color は 11 クラスで 1 画像あたり
+    この値だけを見てはいけない。内部データのある head は 11 クラスで 1 画像あたり
     平均 1.50 個が正なので、**「1 つも付けない」と答えるだけで 0.864** になる。
     そこで multi_label では `exact_match`（集合が完全に一致した画像の割合）も返す。
     同じ状態の exact_match は 0.000 であり、こちらが実態を表す。
@@ -434,8 +434,8 @@ def main() -> None:
         # logits の大きさは head の重みの大きさだけで決まる。1e-4 では 15 エポック回しても
         # 重みが初期値からほとんど動かず、loss が chance 水準に張り付いたまま終わる。
         #
-        # 実データ（poc_ws・埋め込み ViT-L/14@336px）で実測した val_acc:
-        #   character  1e-4: 0.557 -> 1e-3: 0.943    hair_color 1e-4: 0.456 -> 1e-3: 0.956
+        # 内部データ（埋め込み ViT-L/14@336px）で実測した val_acc:
+        #   head A  1e-4: 0.557 -> 1e-3: 0.943    head B  1e-4: 0.456 -> 1e-3: 0.956
         # 平均最大確率も 0.04 前後から意味のある水準へ動く。**精度そのものが上がる。**
         #
         # 1e-2 はさらに速いが、train_acc が 1.0 に張り付き小規模データで過学習しやすい。
@@ -487,7 +487,7 @@ def main() -> None:
         type=str,
         default=None,
         help=(
-            "カンマ区切りで複数 head id を指定 (例: 'character,hair_color')。"
+            "カンマ区切りで複数 head id を指定 (例: 'shape,color')。"
             " 指定時は --class-head より優先され、列挙された head を順番に学習します。"
         ),
     )
@@ -923,7 +923,7 @@ def main() -> None:
             # となり、最後まで回せば acc 0.896 / ≥0.90 帯 146 件に届いていた。
             #
             # multi_label では更に悪い。val_acc は per-element なので、
-            # hair_color（11 クラス・1 画像あたり平均 1.50 個が正）では
+            # 11 クラス・1 画像あたり平均 1.50 個が正の head では
             # 「1 つも付けない」と答えるだけで 0.864 になる。その結果 val_acc 基準は
             # **epoch 1 の「何も予測しないモデル」を最良として採用**していた
             # （集合の完全一致は 0.000）。
