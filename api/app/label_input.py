@@ -92,9 +92,11 @@ def _labels_template() -> Dict[str, Any]:
 
 
 def _schema_template() -> Dict[str, Any]:
+    # experiments.DEFAULT_LABEL_SCHEMA と同じ識別子を使う（#251 B-1）。
+    # split は予約 head なので heads は空で始まる。
     return {
         "version": 2,
-        "schema_id": "vtuber_v1",
+        "schema_id": "default_v1",
         "heads": [],
     }
 

@@ -83,9 +83,13 @@ class RenameExperimentBody(BaseModel):
 
 
 # Default schema used when creating a new experiment.
+#
+# schema_id は画面に出るだけの識別子で、分岐には使われない。
+# 以前は開発者の非公開データ由来の値が入っており、experiment を作った利用者
+# 全員の label_schema.json に書き込まれていた（#251 B-1）。
 DEFAULT_LABEL_SCHEMA = {
     "version": 2,
-    "schema_id": "vtuber_v1",
+    "schema_id": "default_v1",
     "heads": [
         {
             "id": "split",
