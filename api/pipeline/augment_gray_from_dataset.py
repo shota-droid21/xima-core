@@ -38,6 +38,63 @@ def load_index(index_path: Path) -> Dict[str, Any]:
     return data
 
 
+# label_schema.json の head に立てるフラグ。
+# 「白黒にしたらこの head の答えは成立しない」を利用者が宣言する。
+GRAY_INVALIDATE_FLAG = "invalidated_by_grayscale"
+
+
+def infer_schema_path(dataset_root: Path) -> Path:
+    """dataset ルートから label_schema.json の在り処を推測する。
+
+    experiments/<exp>/dataset が dataset ルートなので、スキーマはその 1 つ上の
+    label_input/ にある。train_epoch.py と同じ推測をする。
+    """
+    return dataset_root.parent / "label_input" / "label_schema.json"
+
+
+def resolve_gray_invalidated_heads(
+    explicit: str | None,
+    schema_path: Path | None,
+) -> List[str]:
+    """白黒化で無効にする head の id を決める。
+
+    決め方は 2 通りで、明示指定が優先される。
+
+    1. ``--grayscale-invalidates`` に head id をカンマ区切りで渡す
+    2. label_schema.json の head に ``invalidated_by_grayscale: true`` を立てる
+
+    どちらも無ければ**何も無効にしない**。以前はここに特定の head 名
+    （開発者のスキーマ由来）が直書きされており、その名前を使っていない
+    利用者では色ラベルが白黒画像に残ったままデータセットへ入っていた。
+    名前で当てにいくのをやめ、宣言されたものだけを対象にする。
+    """
+    if explicit is not None:
+        ids = [h.strip() for h in explicit.split(",") if h.strip()]
+        return list(dict.fromkeys(ids))
+
+    if schema_path is None or not schema_path.exists():
+        return []
+    try:
+        with schema_path.open("r", encoding="utf-8") as f:
+            schema = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"[WARN] label_schema.json を読めませんでした ({e})。head の無効化は行いません")
+        return []
+
+    heads = schema.get("heads")
+    if not isinstance(heads, list):
+        return []
+    ids: List[str] = []
+    for head in heads:
+        if not isinstance(head, dict):
+            continue
+        if head.get(GRAY_INVALIDATE_FLAG) is True:
+            head_id = str(head.get("id") or "").strip()
+            if head_id:
+                ids.append(head_id)
+    return list(dict.fromkeys(ids))
+
+
 def is_gray_item(item: Dict[str, Any], suffix: str) -> bool:
     meta = item.get("meta") or {}
     if isinstance(meta, dict) and meta.get("is_gray") is True:
@@ -119,6 +176,25 @@ def main() -> None:
         default=None,
         help="モノクロ生成する最大件数 (デバッグ用)。",
     )
+    parser.add_argument(
+        "--grayscale-invalidates",
+        type=str,
+        default=None,
+        help=(
+            "白黒化で答えが成立しなくなる head の id をカンマ区切りで指定する "
+            "(例: color,tone)。未指定なら label_schema.json の head に立てた "
+            f"`{GRAY_INVALIDATE_FLAG}: true` を見る。どちらも無ければ何も無効にしない。"
+        ),
+    )
+    parser.add_argument(
+        "--schema",
+        type=str,
+        default=None,
+        help=(
+            "label_schema.json のパス。未指定なら dataset-root の 1 つ上の "
+            "label_input/label_schema.json を見る。"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -139,6 +215,24 @@ def main() -> None:
     print(f"[INFO] index.json:   {index_path}")
     print(f"[INFO] target splits: {sorted(target_splits)}")
     print(f"[INFO] suffix:        {args.suffix}")
+
+    schema_path = (
+        Path(args.schema).resolve() if args.schema else infer_schema_path(dataset_root)
+    )
+    gray_invalidated_heads = resolve_gray_invalidated_heads(
+        args.grayscale_invalidates, schema_path
+    )
+    if gray_invalidated_heads:
+        print(f"[INFO] 白黒化で無効にする head: {gray_invalidated_heads}")
+    else:
+        # 黙って何もしないと、色を答える head のラベルが白黒画像に残ったまま
+        # 学習データへ入る。気づけないので、ここで必ず告げる。
+        print(
+            "[WARN] 白黒化で無効にする head がありません。"
+            f" 色などの head を持つなら --grayscale-invalidates で指定するか、"
+            f" label_schema.json の head に {GRAY_INVALIDATE_FLAG}: true を立ててください"
+        )
+
     if args.dry_run:
         print("[INFO] DRY-RUN モード: ファイルや index.json は書き換えません")
 
@@ -245,10 +339,9 @@ def main() -> None:
             labels = {}
 
         new_labels = dict(labels)
-        if "concept_color" in new_labels:
-            new_labels["concept_color"] = None
-        if "hair_color" in new_labels:
-            new_labels["hair_color"] = None
+        for head_id in gray_invalidated_heads:
+            if head_id in new_labels:
+                new_labels[head_id] = None
 
         meta = it.get("meta") or {}
         if not isinstance(meta, dict):
