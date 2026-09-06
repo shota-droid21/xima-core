@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, HTTPException
 
 from .config import ConfigManager
+from .embeddings import experiment_cache_root
 from .label_input import (
     load_label_json,
     normalize_label_schema_payload,
@@ -42,13 +43,6 @@ from embedding_cache import (  # noqa: E402
 # 埋め込みに使う既定 CLIP モデル（embed_images の既定と一致させる）。
 DEFAULT_CLIP_MODEL = "ViT-B/32"
 _SPLIT_HEAD_ID = "split"
-
-
-def _experiment_cache_root(cfg, workspace: str, experiment: str) -> Path:
-    """experiments/<exp>/cache（embed_images と同じ基準）。"""
-    label_path = cfg.label_input_path_for(workspace, experiment)
-    # .../experiments/<exp>/label_input/labels.json -> .../experiments/<exp>/cache
-    return label_path.parent.parent / "cache"
 
 
 def _load_embeddings(
@@ -158,7 +152,7 @@ def create_clustering_router(config_manager: ConfigManager) -> APIRouter:
 
         try:
             cache_dir = embeddings_dir(
-                _experiment_cache_root(cfg, workspace, experiment), DEFAULT_CLIP_MODEL
+                experiment_cache_root(cfg, workspace, experiment), DEFAULT_CLIP_MODEL
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))

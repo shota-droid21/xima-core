@@ -250,6 +250,27 @@ curl -s http://127.0.0.1:27801/workspaces/ws_test/experiments/exp1/label-input/h
 curl -X POST http://127.0.0.1:27801/workspaces/ws_test/experiments/exp1/label-input/history/labels_20251220_023103/restore
 ```
 
+## 埋め込みの状態（embeddings）
+
+`cache/embeddings/<model_slug>/` に**どの CLIP モデルの埋め込みが、何件あるか**を返す
+**読み取り専用** API。候補付与（`predict_labels`）とクラスタは学習に使ったのと同じモデルの
+埋め込みを必要とするため、UI がジョブを投げる前に前提を確認するために使う。
+
+- GET `/workspaces/{ws}/experiments/{exp}/embeddings`
+  - クエリなし。experiment が無くても **200**（`target_count: 0`, `models: []`）。
+  - レスポンス: `{ target_count, models: [{ clip_model_name, slug, count, dim, usable, updated_at }] }`
+    - `target_count`: `labels.json` の item 数。**画像ファイルの実在は見ない**ため、
+      `count < target_count` は未作成とは限らない（欠損画像・読めない画像は埋め込み対象から外れる）。進捗の目安。
+    - `usable`: `index.json` と `embeddings.npy` が揃っているか。**`predict_labels` と `clusters` が動く条件と同じ**。
+    - `count` / `dim`: `index.json` の値。行列ファイルは読まない。
+    - `updated_at`: `index.json` の更新時刻（ISO8601 / UTC）。
+  - **一覧に出ないもの**: キャッシュの版が違う / `index.json` が壊れている / モデル名が空。
+    いずれも `embed_images` で作り直す対象なので「無い」と扱う。
+
+```bash
+curl -s "http://127.0.0.1:27801/workspaces/ws_test/experiments/exp1/embeddings" | jq .
+```
+
 ## 類似画像クラスタリング（clusters）
 
 CLIP 埋め込み（`embed_images` ジョブが生成する `cache/embeddings`）を使って、似た画像を
