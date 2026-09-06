@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, HTTPException
 
 from .config import ConfigManager
-from .embeddings import experiment_cache_root
+from .embeddings import collect_models, experiment_cache_root
 from .label_input import (
     load_label_json,
     normalize_label_schema_payload,
@@ -40,9 +40,32 @@ from embedding_cache import (  # noqa: E402
     load_index,
 )
 
-# 埋め込みに使う既定 CLIP モデル（embed_images の既定と一致させる）。
-DEFAULT_CLIP_MODEL = "ViT-B/32"
 _SPLIT_HEAD_ID = "split"
+
+
+def _resolve_clip_model(cache_root: Path, requested: Optional[str]) -> str:
+    """どのモデルの埋め込みでクラスタを切るかを決める（#261）。
+
+    以前はここが `ViT-B/32` の定数だった。**学習に何を使っていても常に ViT-B/32 で
+    切っていた**ため、別モデルで学習した利用者は学習と違う空間のまとまりに対して
+    一括ラベル付与をしていた。まとまりがずれたまま付与すると、そのまま学習データの
+    質が落ちる。しかも UI にモデルの表示も選択も無く、気づく手段が無かった。
+
+    指定が無いときに既定へ落とさないのは、それが上の不具合そのものだから。
+    埋め込みが在るものから選び、1 つも無ければ呼び出し側が 409 にする。
+    """
+    if requested and requested.strip():
+        return requested.strip()
+
+    models = collect_models(cache_root)
+    usable = [m for m in models if m.get("usable")]
+    if not usable:
+        return ""
+    # 最も新しく作られたものを既定にする。実際に使うモデルは app が
+    # 最新 run の clip_model_name から明示して送るため、ここは API を直接
+    # 叩く場合の落としどころ。
+    usable.sort(key=lambda m: str(m.get("updated_at") or ""), reverse=True)
+    return str(usable[0]["clip_model_name"])
 
 
 def _load_embeddings(
@@ -140,6 +163,7 @@ def create_clustering_router(config_manager: ConfigManager) -> APIRouter:
         head: Optional[str] = None,
         width: int = 256,
         seed: int = 0,
+        clip_model: Optional[str] = None,
     ) -> Dict[str, Any]:
         cfg = config_manager.get_config()
 
@@ -150,21 +174,31 @@ def create_clustering_router(config_manager: ConfigManager) -> APIRouter:
         if k is not None and k < 1:
             raise HTTPException(status_code=400, detail="k must be >= 1")
 
-        try:
-            cache_dir = embeddings_dir(
-                experiment_cache_root(cfg, workspace, experiment), DEFAULT_CLIP_MODEL
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-
-        loaded = _load_embeddings(cache_dir)
-        if loaded is None:
-            # 埋め込み未作成。UI に「先に埋め込みを作る」導線を促す。
+        cache_root = experiment_cache_root(cfg, workspace, experiment)
+        resolved_model = _resolve_clip_model(cache_root, clip_model)
+        if not resolved_model:
             raise HTTPException(
                 status_code=409,
                 detail=(
                     "embeddings not found; run the embed_images job first "
                     "(cache/embeddings is empty)"
+                ),
+            )
+
+        try:
+            cache_dir = embeddings_dir(cache_root, resolved_model)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        loaded = _load_embeddings(cache_dir)
+        if loaded is None:
+            # **どのモデルの埋め込みが要るかまで書く。** 「embed_images を実行しろ」
+            # だけでは、既定（ViT-B/32）で作り直して同じ 409 に戻ってくる。
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"embeddings not found for clip_model={resolved_model}; "
+                    f"run the embed_images job with --clip-model {resolved_model}"
                 ),
             )
         items, vectors = loaded
@@ -209,7 +243,7 @@ def create_clustering_router(config_manager: ConfigManager) -> APIRouter:
         return {
             "workspace": workspace.strip(),
             "experiment": experiment.strip(),
-            "clip_model_name": DEFAULT_CLIP_MODEL,
+            "clip_model_name": resolved_model,
             "scope": scope,
             "head": resolved_head,
             "k": result["k"],

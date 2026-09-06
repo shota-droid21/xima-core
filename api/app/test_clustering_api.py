@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -14,6 +15,9 @@ from fastapi.testclient import TestClient
 
 from app.clustering import create_clustering_router
 from app.config import ConfigManager
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))
+from embedding_cache import embeddings_dir, model_slug  # noqa: E402
 
 WS = "wsdemo01"
 EXP = "expdemo1"
@@ -68,6 +72,35 @@ def _write_labels(config_manager, items, labeled_head_by_fid):
     schema_path.write_text(json.dumps(schema, ensure_ascii=False), encoding="utf-8")
 
 
+def _write_cache(config_manager, model_name: str, count: int = 9) -> Path:
+    """埋め込みキャッシュの体裁だけ作る（#261 のモデル解決に要る）。
+
+    行列の中身は `_load_embeddings` をスタブ化するので読まれない。
+    ここで作るのは「そのモデルの埋め込みが在る」ことを示す index.json と
+    embeddings.npy の 2 ファイル。
+
+    **ディレクトリ名は `embeddings_dir` と同じ規則で決める。** 手で書くと
+    解決先とずれ、スタブに隠れて気づけない。
+    """
+    cfg = config_manager.get_config()
+    cache_root = cfg.label_input_path_for(WS, EXP).parent.parent / "cache"
+    d = embeddings_dir(cache_root, model_name)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "index.json").write_text(
+        json.dumps(
+            {
+                "version": "1",
+                "clip_model_name": model_name,
+                "dim": 2,
+                "count": count,
+                "items": [{"file_id": f"img_{i}", "row": i} for i in range(count)],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (d / "embeddings.npy").write_bytes(b"\x00")
+    return d
+
 def test_returns_409_when_embeddings_missing(tmp_path, monkeypatch):
     client, _ = _make_client(tmp_path)
     res = client.get(f"/workspaces/{WS}/experiments/{EXP}/clusters")
@@ -76,8 +109,9 @@ def test_returns_409_when_embeddings_missing(tmp_path, monkeypatch):
 
 
 def test_clusters_group_similar_vectors(tmp_path, monkeypatch):
-    client, _ = _make_client(tmp_path)
+    client, cfg = _make_client(tmp_path)
     items, vectors = _blob_items()
+    _write_cache(cfg, "ViT-B/32")
     monkeypatch.setattr("app.clustering._load_embeddings", lambda _d: (items, vectors))
 
     res = client.get(
@@ -102,6 +136,7 @@ def test_scope_unlabeled_excludes_labeled_items(tmp_path, monkeypatch):
     items, vectors = _blob_items()
     # img_0 だけ shape を付与済み → unlabeled から除外されるはず
     _write_labels(cfg, items, {"img_0": {"shape": "a"}})
+    _write_cache(cfg, "ViT-B/32")
     monkeypatch.setattr("app.clustering._load_embeddings", lambda _d: (items, vectors))
 
     res = client.get(
@@ -118,10 +153,75 @@ def test_scope_unlabeled_excludes_labeled_items(tmp_path, monkeypatch):
 
 
 def test_rejects_bad_scope(tmp_path, monkeypatch):
-    client, _ = _make_client(tmp_path)
+    client, cfg = _make_client(tmp_path)
     items, vectors = _blob_items()
+    _write_cache(cfg, "ViT-B/32")
     monkeypatch.setattr("app.clustering._load_embeddings", lambda _d: (items, vectors))
     res = client.get(
         f"/workspaces/{WS}/experiments/{EXP}/clusters", params={"scope": "bogus"}
     )
     assert res.status_code == 400
+
+
+def test_uses_requested_clip_model(tmp_path, monkeypatch):
+    """clip_model を指定すると、そのモデルのキャッシュを読みに行く。"""
+    seen: list[str] = []
+    client, cfg = _make_client(tmp_path)
+    items, vectors = _blob_items()
+    _write_cache(cfg, "ViT-B/32")
+    _write_cache(cfg, "ViT-L/14@336px")
+
+    def _stub(cache_dir):
+        seen.append(cache_dir.name)
+        return items, vectors
+
+    monkeypatch.setattr("app.clustering._load_embeddings", _stub)
+
+    res = client.get(
+        f"/workspaces/{WS}/experiments/{EXP}/clusters",
+        params={"clip_model": "ViT-L/14@336px"},
+    )
+
+    assert res.status_code == 200
+    assert res.json()["clip_model_name"] == "ViT-L/14@336px"
+    assert seen == [model_slug("ViT-L/14@336px")]
+
+
+def test_defaults_to_newest_embeddings_not_vit_b_32(tmp_path, monkeypatch):
+    """指定が無いとき **ViT-B/32 に落とさない**。最も新しい埋め込みを使う。
+
+    これが #261 の本体。以前は定数で ViT-B/32 に固定しており、
+    学習に別モデルを使っていてもクラスタだけ別の空間で切られていた。
+    """
+    import os
+    import time
+
+    client, cfg = _make_client(tmp_path)
+    items, vectors = _blob_items()
+    _write_cache(cfg, "ViT-B/32")
+    vit_l_dir = _write_cache(cfg, "ViT-L/14@336px")
+
+    # ViT-L の index.json を新しくする（mtime が updated_at の元）。
+    newer = time.time() + 60
+    os.utime(vit_l_dir / "index.json", (newer, newer))
+
+    monkeypatch.setattr("app.clustering._load_embeddings", lambda _d: (items, vectors))
+
+    res = client.get(f"/workspaces/{WS}/experiments/{EXP}/clusters")
+
+    assert res.status_code == 200
+    assert res.json()["clip_model_name"] == "ViT-L/14@336px"
+
+
+def test_409_names_the_required_model(tmp_path, monkeypatch):
+    """どのモデルの埋め込みが要るかを 409 に含める。"""
+    client, cfg = _make_client(tmp_path)
+    _write_cache(cfg, "ViT-B/32")
+
+    res = client.get(
+        f"/workspaces/{WS}/experiments/{EXP}/clusters",
+        params={"clip_model": "ViT-L/14@336px"},
+    )
+
+    assert res.status_code == 409
+    assert "ViT-L/14@336px" in res.json()["detail"]
