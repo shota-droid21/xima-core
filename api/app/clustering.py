@@ -119,25 +119,44 @@ def _default_head_id(schema: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _labeled_file_ids(cfg, workspace: str, experiment: str, head_id: str) -> set[str]:
-    """指定 head で既にラベル済みの file_id 集合。"""
+def _unlabeled_exclusions(
+    cfg, workspace: str, experiment: str, head_id: str
+) -> set[str]:
+    """`scope=unlabeled` で除く file_id の集合。
+
+    除く理由は 2 つある。
+
+    1. その head で **既にラベルが付いている**
+    2. **削除マークが付いている**（#293）
+
+    2 は以前は見ていなかった。`delete` は item 直下のフラグで `labels` とは別の
+    レイヤーにあり、ここが `labels[head]` しか見ていなかったためである。その結果
+    **消すと決めた画像が「残りに付ける対象」として出続けていた**。筋が通らないうえ、
+    重複を削除マークで片付けても視界から消えないので、まとまりを 1 つずつ処理する
+    使い方が成立しなかった。
+
+    labels.json は 1 度だけ読む。2 つに分けると同じファイルを 2 回読むことになる。
+    """
     try:
         label_path = cfg.label_input_path_for(workspace, experiment)
         data = load_label_json(label_path)
     except (FileNotFoundError, ValueError):
         return set()
 
-    labeled: set[str] = set()
+    excluded: set[str] = set()
     for item in data.get("items") or []:
         if not isinstance(item, dict):
             continue
         fid = item.get("file_id")
         if not isinstance(fid, str):
             continue
+        if item.get("delete") is True:
+            excluded.add(fid)
+            continue
         value = (item.get("labels") or {}).get(head_id)
         if value not in (None, "", [], {}):
-            labeled.add(fid)
-    return labeled
+            excluded.add(fid)
+    return excluded
 
 
 def _member_view(
@@ -213,13 +232,13 @@ def create_clustering_router(config_manager: ConfigManager) -> APIRouter:
                     _load_schema(cfg, workspace, experiment)
                 )
             if resolved_head:
-                labeled = _labeled_file_ids(
+                excluded = _unlabeled_exclusions(
                     cfg, workspace, experiment, resolved_head
                 )
                 keep = [
                     idx
                     for idx, it in enumerate(items)
-                    if str(it.get("file_id") or "") not in labeled
+                    if str(it.get("file_id") or "") not in excluded
                 ]
                 items = [items[idx] for idx in keep]
                 # vectors は numpy 行列でも list でも同じ形で絞れるようにする。

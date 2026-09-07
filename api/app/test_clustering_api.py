@@ -41,11 +41,15 @@ def _blob_items():
     return items, vectors
 
 
-def _write_labels(config_manager, items, labeled_head_by_fid):
-    """labels.json / label_schema.json を用意する。"""
+def _write_labels(config_manager, items, labeled_head_by_fid, delete_fids=()):
+    """labels.json / label_schema.json を用意する。
+
+    `delete_fids` は削除マークを付ける file_id（#293）。
+    """
     cfg = config_manager.get_config()
     label_path = cfg.label_input_path_for(WS, EXP)
     label_path.parent.mkdir(parents=True, exist_ok=True)
+    marked = set(delete_fids)
     docs = {
         "meta": {},
         "items": [
@@ -54,6 +58,7 @@ def _write_labels(config_manager, items, labeled_head_by_fid):
                 "file_id": it["file_id"],
                 "path": it["path"],
                 "labels": labeled_head_by_fid.get(it["file_id"], {}),
+                **({"delete": True} if it["file_id"] in marked else {}),
             }
             for i, it in enumerate(items)
         ],
@@ -225,3 +230,44 @@ def test_409_names_the_required_model(tmp_path, monkeypatch):
 
     assert res.status_code == 409
     assert "ViT-L/14@336px" in res.json()["detail"]
+
+
+def test_scope_unlabeled_excludes_delete_marked_items(tmp_path, monkeypatch):
+    """削除マークを付けたものは「残りに付ける対象」ではない（#293）。
+
+    以前は `labels[head]` しか見ておらず、**消すと決めた画像が出続けていた**。
+    重複を削除マークで片付けても視界から消えないため、まとまりを 1 つずつ
+    処理する使い方が成立しなかった。
+    """
+    client, cfg = _make_client(tmp_path)
+    items, vectors = _blob_items()
+    # img_1 はラベル無し・削除マークあり → 除外されるはず
+    _write_labels(cfg, items, {}, delete_fids=["img_1"])
+    _write_cache(cfg, "ViT-B/32")
+    monkeypatch.setattr("app.clustering._load_embeddings", lambda _d: (items, vectors))
+
+    res = client.get(
+        f"/workspaces/{WS}/experiments/{EXP}/clusters",
+        params={"scope": "unlabeled"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    seen = [m["file_id"] for c in body["clusters"] for m in c["members"]]
+    assert "img_1" not in seen
+    assert body["total"] == len(items) - 1
+
+
+def test_scope_all_keeps_delete_marked_items(tmp_path, monkeypatch):
+    """`scope=all` は絞り込まない。削除マークでも消さない。"""
+    client, cfg = _make_client(tmp_path)
+    items, vectors = _blob_items()
+    _write_labels(cfg, items, {}, delete_fids=["img_1"])
+    _write_cache(cfg, "ViT-B/32")
+    monkeypatch.setattr("app.clustering._load_embeddings", lambda _d: (items, vectors))
+
+    body = client.get(
+        f"/workspaces/{WS}/experiments/{EXP}/clusters", params={"scope": "all"}
+    ).json()
+    seen = [m["file_id"] for c in body["clusters"] for m in c["members"]]
+    assert "img_1" in seen
+    assert body["total"] == len(items)
