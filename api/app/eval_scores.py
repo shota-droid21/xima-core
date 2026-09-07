@@ -13,7 +13,7 @@ import csv
 import io
 import json
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 # eval ディレクトリ配下の scores ファイルのみを許可する（パストラバーサル防止）。
@@ -180,3 +180,43 @@ def rows_to_csv(rows: List[Dict[str, Any]], heads: List[str]) -> str:
         writer.writerow(record)
 
     return buffer.getvalue()
+
+
+# 一覧に載せてよい meta の項目（#282）。
+#
+# **`run_dir` / `index_path` / `schema_path` は載せない。** これらは絶対パスで、
+# 実行した機械のディレクトリ構成がそのまま入る。画面にも API にも出す理由が無い。
+# run の識別子だけが要るので、`run_dir` の末尾だけを `run` として出す。
+_LISTING_META_KEYS = ("clip_model_name", "heads", "head_types", "generated_at")
+
+
+def listing_meta(path: Path) -> Optional[Dict[str, Any]]:
+    """scores ファイルの meta から、一覧に出してよい項目だけを取り出す。
+
+    どの学習結果を、どのモデルの埋め込みで測ったのかは meta にしか無い。
+    一覧に無いと、ファイルを 1 つずつ開いて確かめることになる（#282）。
+
+    読めない・壊れているファイルでは None を返す。**一覧そのものは出す。**
+    1 つのファイルが壊れているせいで測定結果が 1 件も見えなくなる方が困る。
+    """
+    try:
+        data = load_json_file(path)
+    except Exception:
+        return None
+
+    meta = data.get("meta")
+    if not isinstance(meta, dict):
+        return None
+
+    out: Dict[str, Any] = {}
+    for key in _LISTING_META_KEYS:
+        value = meta.get(key)
+        if value not in (None, "", [], {}):
+            out[key] = value
+
+    run_dir = meta.get("run_dir")
+    if isinstance(run_dir, str) and run_dir.strip():
+        # 末尾のディレクトリ名だけ。絶対パスは出さない。
+        out["run"] = PurePosixPath(run_dir.replace("\\", "/")).name
+
+    return out or None

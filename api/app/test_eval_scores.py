@@ -6,10 +6,13 @@ from pathlib import Path
 
 import pytest
 
+import json
+
 from app.eval_scores import (
     ScoresNameError,
     build_rows,
     index_items_by_id,
+    listing_meta,
     paginate,
     resolve_heads,
     resolve_scores_path,
@@ -142,3 +145,61 @@ def test_rows_to_csv_leaves_missing_predictions_blank() -> None:
     csv_text = rows_to_csv(rows, ["character"])
 
     assert csv_text.strip().splitlines()[1] == "a,,,"
+
+
+def _write_scores(path: Path, meta: object) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"items": [], "meta": meta}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_listing_meta_drops_absolute_paths(tmp_path: Path) -> None:
+    """**絶対パスは返さない。** 実行した機械のディレクトリ構成が漏れる。"""
+    path = _write_scores(
+        tmp_path / "scores_run_1.json",
+        {
+            "run_dir": "/Users/someone/xima/core/workspaces/ws/experiments/exp/models/run_1",
+            "index_path": "/Users/someone/xima/.../index.json",
+            "schema_path": "/Users/someone/xima/.../label_schema.json",
+            "clip_model_name": "ViT-L/14@336px",
+            "heads": ["character"],
+            "head_types": {"character": "multi_class"},
+            "generated_at": "2026-09-07T00:00:00Z",
+        },
+    )
+
+    meta = listing_meta(path)
+    assert meta is not None
+    assert set(meta) == {
+        "clip_model_name",
+        "heads",
+        "head_types",
+        "generated_at",
+        "run",
+    }
+    # run はディレクトリ名だけ
+    assert meta["run"] == "run_1"
+    assert not any("/Users/" in str(v) for v in meta.values())
+
+
+def test_listing_meta_returns_none_for_broken_file(tmp_path: Path) -> None:
+    """壊れた 1 件のせいで一覧そのものが出せなくなる方が困る。"""
+    path = tmp_path / "scores_run_broken.json"
+    path.write_text("{ not json", encoding="utf-8")
+    assert listing_meta(path) is None
+
+
+def test_listing_meta_returns_none_when_meta_missing(tmp_path: Path) -> None:
+    path = _write_scores(tmp_path / "scores_run_2.json", None)
+    assert listing_meta(path) is None
+
+
+def test_listing_meta_skips_empty_values(tmp_path: Path) -> None:
+    path = _write_scores(
+        tmp_path / "scores_run_3.json",
+        {"clip_model_name": "ViT-B/32", "heads": [], "generated_at": ""},
+    )
+    assert listing_meta(path) == {"clip_model_name": "ViT-B/32"}

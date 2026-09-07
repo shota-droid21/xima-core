@@ -17,6 +17,7 @@ from .eval_scores import (
     ScoresNameError,
     build_rows,
     index_items_by_id,
+    listing_meta,
     load_json_file,
     paginate,
     resolve_heads,
@@ -1003,6 +1004,10 @@ def create_experiments_router(config_manager: ConfigManager) -> APIRouter:
                     "bytes": int(stat.st_size),
                     "mtime": float(stat.st_mtime),
                     "url": url,
+                    # どの学習結果を、どのモデルの埋め込みで測ったのか（#282）。
+                    # ファイル本体を読むが、1.5 MB で 7 ms 程度。一覧を開くのは
+                    # 頻繁ではないので、1 つずつ開いて確かめさせるより安い。
+                    "meta": listing_meta(p),
                 }
             )
 
