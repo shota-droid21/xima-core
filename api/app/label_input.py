@@ -25,6 +25,29 @@ _LEGACY_SPLIT_ALIASES = {"ignore": "unassigned", "delete": "unassigned"}
 _DEFAULT_THUMB_WIDTH = 256
 
 
+def label_revision(label_path: Path) -> str:
+    """labels.json の版を表す文字列（#294）。
+
+    保存の前に「読み込んだあと core 側が進んでいないか」を見るために使う。
+
+    **更新時刻とサイズから作る。** PUT の回数を数える方式では、PUT を通らずに
+    ファイルを書くジョブ（`make_label_list` / `apply_label` /
+    `purge_deleted_images`）の書き換えを取りこぼす。ファイル自体から作れば、
+    誰が書いても変わる。
+
+    内容ハッシュにしないのは、数 MB のファイルを保存のたびに読み直すことになる
+    ため。ここは `stat` だけで済ませる。**同じ内容で書き直しても版は変わる**が、
+    保存の応答で新しい版を返すので、自分の保存を「core が進んだ」と誤検知しない。
+
+    ファイルが無ければ空文字。まだ 1 度も書かれていない状態を表す。
+    """
+    try:
+        stat = label_path.stat()
+    except OSError:
+        return ""
+    return f"{stat.st_mtime_ns}-{stat.st_size}"
+
+
 def load_label_json(label_path: Path) -> Dict[str, Any]:
     if not label_path.exists():
         raise FileNotFoundError(label_path)
@@ -732,6 +755,31 @@ def create_label_input_router(config_manager: ConfigManager) -> APIRouter:
             "version": str(version_path),
         }
 
+    @router.get(
+        "/workspaces/{workspace}/experiments/{experiment}/label-input/revision"
+    )
+    def get_label_revision_scoped(workspace: str, experiment: str) -> Dict[str, Any]:
+        """labels.json の版だけを返す（#294）。
+
+        保存の前に「core 側が進んでいないか」を見るための軽い口。labels.json は
+        実データで数 MB あり、確認のたびに全体を取り直すのは割に合わない。
+
+        版は **PUT だけでなく、ジョブが直接書き換えた場合も変わる**必要がある。
+        `make_label_list` / `apply_label` / `purge_deleted_images` は PUT を通らず
+        ファイルを書くため、PUT の回数を数える方式では取りこぼす。ファイルの
+        更新時刻とサイズから作れば、誰が書いても変わる。
+        """
+        cfg = config_manager.get_config()
+        try:
+            label_path = cfg.label_input_path_for(workspace, experiment)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {
+            "workspace": workspace.strip(),
+            "experiment": experiment.strip(),
+            "revision": label_revision(label_path),
+        }
+
     @router.put("/workspaces/{workspace}/experiments/{experiment}/label-input")
     def put_label_input_scoped(
         workspace: str,
@@ -789,6 +837,9 @@ def create_label_input_router(config_manager: ConfigManager) -> APIRouter:
             "backup": str(backup_path),
             "workspace": workspace.strip(),
             "experiment": experiment.strip(),
+            # 保存した直後の版。app はこれを控えて、次の保存前の突き合わせに使う。
+            # 返さないと、自分の保存で版が動いたことを「core が進んだ」と誤検知する。
+            "revision": label_revision(label_path),
         }
 
     @router.get("/workspaces/{workspace}/experiments/{experiment}/label-input/history")

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app.label_input import (
@@ -200,3 +202,33 @@ def test_normalize_label_thumb_paths_rewrites_legacy_thumb_path() -> None:
         "/static/uybwcicl/experiments/a8h131ej/cache/thumbs/w256/"
         "e9/e9d71f5ee7c92d6dc9e92ffdad17b8bd49418f98.webp"
     )
+
+
+def test_label_revision_changes_on_any_write(tmp_path):
+    """版は **PUT を通らない書き換えでも変わる**（#294）。
+
+    make_label_list / apply_label / purge_deleted_images はファイルを直接書く。
+    PUT の回数を数える方式だと、それらを取りこぼす。
+    """
+    from app.label_input import label_revision
+
+    path = tmp_path / "labels.json"
+    assert label_revision(path) == ""  # まだ無い
+
+    path.write_text(json.dumps({"items": [], "meta": {}}), encoding="utf-8")
+    first = label_revision(path)
+    assert first != ""
+
+    # 直接書き換える（ジョブがやること）
+    path.write_text(
+        json.dumps({"items": [{"id": 0}], "meta": {}}), encoding="utf-8"
+    )
+    assert label_revision(path) != first
+
+
+def test_label_revision_is_stable_without_writes(tmp_path):
+    from app.label_input import label_revision
+
+    path = tmp_path / "labels.json"
+    path.write_text(json.dumps({"items": [], "meta": {}}), encoding="utf-8")
+    assert label_revision(path) == label_revision(path)
