@@ -38,6 +38,19 @@ def test_empty_file_returns_unknown(monkeypatch, tmp_path: Path) -> None:
     assert version_mod.read_core_version() == version_mod.UNKNOWN_VERSION
 
 
+def _repository_paths() -> tuple[Path, Path, Path] | None:
+    """monorepo の `core/VERSION` / `app/package.json` / `app/package-lock.json`。
+
+    公開 core（subtree split）には `app/` が無いので、その場合は None を返す。
+    """
+    core_root = Path(version_mod.__file__).resolve().parents[3]
+    app_root = core_root.parent / "app"
+    package_json = app_root / "package.json"
+    if not package_json.exists():
+        return None
+    return core_root / "VERSION", package_json, app_root / "package-lock.json"
+
+
 def test_repository_version_file_matches_app_package_json() -> None:
     """core/VERSION と app/package.json のずれを検出する。
 
@@ -45,15 +58,44 @@ def test_repository_version_file_matches_app_package_json() -> None:
     """
     import json
 
-    core_root = Path(version_mod.__file__).resolve().parents[3]
-    package_json = core_root.parent / "app" / "package.json"
-    if not package_json.exists():
-        # 公開 core（subtree split）には app/ が無い。そちらでは検査対象外。
+    paths = _repository_paths()
+    if paths is None:
         return
+    version_file, package_json, _ = paths
 
-    core_version = (core_root / "VERSION").read_text(encoding="utf-8").strip()
+    core_version = version_file.read_text(encoding="utf-8").strip()
     app_version = json.loads(package_json.read_text(encoding="utf-8"))["version"]
     assert core_version == app_version, (
         f"core/VERSION ({core_version}) と app/package.json ({app_version}) が"
         "一致していません。リリース時は両方を上げてください。"
+    )
+
+
+def test_repository_version_file_matches_app_package_lock() -> None:
+    """app/package-lock.json の置き去りを検出する（#169 / known-gaps G-002）。
+
+    lock の version は依存解決に使われないため、ずれても動く。だからこそ人の目では
+    見つからず、v0.3.5 の時点で 5 版ぶん放置されていた。`version` は lock の中に
+    2 箇所あり、片方だけ直しても気づけないので両方を見る。
+
+    上げる作業は monorepo の `scripts/bump-version.sh` に寄せてある（公開 core には
+    無い。この検査も公開 core では対象外になる）。
+    """
+    import json
+
+    paths = _repository_paths()
+    if paths is None:
+        return
+    version_file, _, package_lock = paths
+
+    core_version = version_file.read_text(encoding="utf-8").strip()
+    lock = json.loads(package_lock.read_text(encoding="utf-8"))
+    found = {
+        'package-lock.json["version"]': lock["version"],
+        'package-lock.json["packages"][""]["version"]': lock["packages"][""]["version"],
+    }
+    stale = {name: value for name, value in found.items() if value != core_version}
+    assert not stale, (
+        f"core/VERSION ({core_version}) と一致していません: {stale}。"
+        "`./scripts/bump-version.sh <X.Y.Z>` で 3 ファイルまとめて上げてください。"
     )
