@@ -11,6 +11,9 @@ UI 側はこの結果を使って「クラスタ単位でまとめてラベル�
 - 本モジュールは行列（`embeddings.npy`）の読み込みにのみ numpy を使うが、
   **import は関数内に閉じ込める**。これにより CI（numpy 無し）でも、ローダを
   スタブ化すればルーターを結合テストできる。
+- `scope` の解釈（labels.json をどう読んで誰を残すか）は `cluster_scope` にある。
+  本モジュールは埋め込みの読み込みと応答の整形が本体で、そこにラベルの解釈が
+  混ざると、どちらを直しているのか分からなくなる（#316）。
 """
 
 from __future__ import annotations
@@ -21,13 +24,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException
 
+from . import cluster_scope
 from .config import ConfigManager
 from .embeddings import collect_models, experiment_cache_root
-from .label_input import (
-    load_label_json,
-    normalize_label_schema_payload,
-    thumb_path_from_file_id,
-)
+from .label_input import thumb_path_from_file_id
 
 # pipeline はスクリプト実行時と同じくトップレベル名で解決する。
 _PIPELINE_DIR = Path(__file__).resolve().parent.parent / "pipeline"
@@ -40,8 +40,6 @@ from embedding_cache import (  # noqa: E402
     embeddings_dir,
     load_index,
 )
-
-_SPLIT_HEAD_ID = "split"
 
 
 def _resolve_clip_model(cache_root: Path, requested: Optional[str]) -> str:
@@ -100,65 +98,6 @@ def _load_embeddings(
     return items, matrix[rows]
 
 
-def _load_schema(cfg, workspace: str, experiment: str) -> Dict[str, Any]:
-    try:
-        schema_path = cfg.label_schema_path_for(workspace, experiment)
-        return normalize_label_schema_payload(load_label_json(schema_path))
-    except (FileNotFoundError, ValueError):
-        return {"heads": []}
-
-
-def _default_head_id(schema: Dict[str, Any]) -> Optional[str]:
-    """split 以外で最初に見つかった分類 head の id。"""
-    for head in schema.get("heads") or []:
-        if not isinstance(head, dict):
-            continue
-        hid = str(head.get("id") or "").strip()
-        if hid and hid != _SPLIT_HEAD_ID:
-            return hid
-    return None
-
-
-def _unlabeled_exclusions(
-    cfg, workspace: str, experiment: str, head_id: str
-) -> set[str]:
-    """`scope=unlabeled` で除く file_id の集合。
-
-    除く理由は 2 つある。
-
-    1. その head で **既にラベルが付いている**
-    2. **削除マークが付いている**（#293）
-
-    2 は以前は見ていなかった。`delete` は item 直下のフラグで `labels` とは別の
-    レイヤーにあり、ここが `labels[head]` しか見ていなかったためである。その結果
-    **消すと決めた画像が「残りに付ける対象」として出続けていた**。筋が通らないうえ、
-    重複を削除マークで片付けても視界から消えないので、まとまりを 1 つずつ処理する
-    使い方が成立しなかった。
-
-    labels.json は 1 度だけ読む。2 つに分けると同じファイルを 2 回読むことになる。
-    """
-    try:
-        label_path = cfg.label_input_path_for(workspace, experiment)
-        data = load_label_json(label_path)
-    except (FileNotFoundError, ValueError):
-        return set()
-
-    excluded: set[str] = set()
-    for item in data.get("items") or []:
-        if not isinstance(item, dict):
-            continue
-        fid = item.get("file_id")
-        if not isinstance(fid, str):
-            continue
-        if item.get("delete") is True:
-            excluded.add(fid)
-            continue
-        value = (item.get("labels") or {}).get(head_id)
-        if value not in (None, "", [], {}):
-            excluded.add(fid)
-    return excluded
-
-
 def _member_view(
     item: Dict[str, Any], workspace: str, experiment: str, width: int
 ) -> Dict[str, Any]:
@@ -189,9 +128,10 @@ def create_clustering_router(config_manager: ConfigManager) -> APIRouter:
     ) -> Dict[str, Any]:
         cfg = config_manager.get_config()
 
-        if scope not in ("all", "unlabeled"):
+        if scope not in cluster_scope.SCOPES:
+            allowed = ", ".join(f"'{s}'" for s in cluster_scope.SCOPES)
             raise HTTPException(
-                status_code=400, detail="scope must be 'all' or 'unlabeled'"
+                status_code=400, detail=f"scope must be one of {allowed}"
             )
         if k is not None and k < 1:
             raise HTTPException(status_code=400, detail="k must be >= 1")
@@ -225,28 +165,25 @@ def create_clustering_router(config_manager: ConfigManager) -> APIRouter:
             )
         items, vectors = loaded
 
-        resolved_head = head
-        if scope == "unlabeled":
-            if not resolved_head:
-                resolved_head = _default_head_id(
-                    _load_schema(cfg, workspace, experiment)
-                )
-            if resolved_head:
-                excluded = _unlabeled_exclusions(
-                    cfg, workspace, experiment, resolved_head
-                )
-                keep = [
-                    idx
-                    for idx, it in enumerate(items)
-                    if str(it.get("file_id") or "") not in excluded
-                ]
-                items = [items[idx] for idx in keep]
-                # vectors は numpy 行列でも list でも同じ形で絞れるようにする。
-                vectors = (
-                    vectors[keep]
-                    if hasattr(vectors, "shape")
-                    else [vectors[idx] for idx in keep]
-                )
+        resolved_head = cluster_scope.resolve_head(
+            cfg, workspace, experiment, scope, head
+        )
+        keep_member = cluster_scope.keep_predicate(
+            cfg, workspace, experiment, scope=scope, head_id=resolved_head
+        )
+        if keep_member is not None:
+            keep = [
+                idx
+                for idx, it in enumerate(items)
+                if keep_member(str(it.get("file_id") or ""))
+            ]
+            items = [items[idx] for idx in keep]
+            # vectors は numpy 行列でも list でも同じ形で絞れるようにする。
+            vectors = (
+                vectors[keep]
+                if hasattr(vectors, "shape")
+                else [vectors[idx] for idx in keep]
+            )
 
         result = run_clustering(vectors, k=k, seed=seed)
 

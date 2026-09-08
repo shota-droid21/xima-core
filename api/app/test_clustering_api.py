@@ -271,3 +271,60 @@ def test_scope_all_keeps_delete_marked_items(tmp_path, monkeypatch):
     seen = [m["file_id"] for c in body["clusters"] for m in c["members"]]
     assert "img_1" in seen
     assert body["total"] == len(items)
+
+
+def test_scope_labeled_unassigned_filters_end_to_end(tmp_path, monkeypatch):
+    """`labeled_unassigned` がルーターまで通っていることを見る（#316）。
+
+    誰が残るかの境界は `test_cluster_scope.py` が持つ。ここで見るのは配線
+    （クエリが届き、items と vectors が同じ形で絞られ、応答に scope が返る）。
+    """
+    client, cfg = _make_client(tmp_path)
+    items, vectors = _blob_items()
+    _write_labels(
+        cfg,
+        items,
+        {
+            # 項目に値があり split が無い → 残る
+            "img_0": {"shape": "a"},
+            "img_1": {"shape": "b", "split": "unassigned"},
+            # 学習に入っている → 除く
+            "img_2": {"shape": "a", "split": "train"},
+            "img_3": {"shape": "a", "split": "val"},
+            # split だけ → ラベル済みではない
+            "img_4": {"split": "unassigned"},
+        },
+    )
+    _write_cache(cfg, "ViT-B/32")
+    monkeypatch.setattr("app.clustering._load_embeddings", lambda _d: (items, vectors))
+
+    res = client.get(
+        f"/workspaces/{WS}/experiments/{EXP}/clusters",
+        params={"scope": "labeled_unassigned"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["scope"] == "labeled_unassigned"
+    # head は絞り込みに使わないので、core が勝手に埋めない。
+    assert body["head"] is None
+    assert body["total"] == 2
+    seen = sorted(m["file_id"] for c in body["clusters"] for m in c["members"])
+    assert seen == ["img_0", "img_1"]
+
+
+def test_bad_scope_message_lists_every_scope(tmp_path, monkeypatch):
+    """400 のメッセージから、指定できる値が全部わかること。
+
+    値を増やしたときにメッセージだけ古いままになると、`scope` が 2 つしか無いと
+    読める。
+    """
+    client, cfg = _make_client(tmp_path)
+    items, vectors = _blob_items()
+    _write_cache(cfg, "ViT-B/32")
+    monkeypatch.setattr("app.clustering._load_embeddings", lambda _d: (items, vectors))
+
+    detail = client.get(
+        f"/workspaces/{WS}/experiments/{EXP}/clusters", params={"scope": "bogus"}
+    ).json()["detail"]
+    for scope in ("all", "unlabeled", "labeled_unassigned"):
+        assert scope in detail

@@ -282,8 +282,10 @@ CLIP 埋め込み（`embed_images` ジョブが生成する `cache/embeddings`�
   - 前提: 先に `embed_images` ジョブで埋め込みを作成しておく。未作成時は **409** を返す。
   - クエリ:
     - `k`（省略可）: クラスタ数。省略時は枚数から自動決定（`auto_k`）。
-    - `scope`: `all`（既定）/ `unlabeled`。`unlabeled` は指定 head で未ラベルの画像だけを対象にする。
-    - `head`（省略可）: `unlabeled` の判定に使う head id。省略時は schema の分類 head（split 以外）を自動選択。
+    - `scope`: `all`（既定）/ `unlabeled` / `labeled_unassigned`。
+      - `unlabeled`: 指定 head で未ラベルの画像だけを対象にする。削除マークの付いた画像は除く。
+      - `labeled_unassigned`: **`split` 以外のいずれかの head に値があり、`split` が `train` でも `val` でもない**画像だけを対象にする。削除マークの付いた画像は除く。ラベルは付いているがデータセットに入らない画像（`apply_label` が捨てる画像）を集める。
+    - `head`（省略可）: `unlabeled` の判定に使う head id。省略時は schema の分類 head（split 以外）を自動選択。`labeled_unassigned` は head を見ないため、省略時は自動選択せず、応答の `head` は `null` になる。
     - `width`（既定 256）: 返すサムネイルパスの幅。
   - レスポンス: `{ k, total, scope, head, clip_model_name, clusters: [{ cluster_id, size, representative, members: [{ file_id, path, thumb_path }] }] }`
     - クラスタはサイズ降順、メンバは中心に近い順（代表が先頭）。
@@ -293,6 +295,8 @@ CLIP 埋め込み（`embed_images` ジョブが生成する `cache/embeddings`�
 curl -s "http://127.0.0.1:27801/workspaces/ws_test/experiments/exp1/clusters?k=3" | jq .
 # 未ラベルだけをクラスタリング
 curl -s "http://127.0.0.1:27801/workspaces/ws_test/experiments/exp1/clusters?scope=unlabeled" | jq .
+# ラベルは付いているが split が train/val でない（＝データセットに入らない）画像だけ
+curl -s "http://127.0.0.1:27801/workspaces/ws_test/experiments/exp1/clusters?scope=labeled_unassigned" | jq .
 ```
 
 ## 画像取得
