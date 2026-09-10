@@ -50,6 +50,7 @@ from label_schema import (
     load_schema,
     normalize_label_for_head,
 )
+from unusable_labels import count_unusable, describe, summarize
 from run_meta import (
     RUN_META_VERSION,
     build_head_metrics,
@@ -1042,6 +1043,31 @@ def main() -> None:
             best_val_acc=(best_state or {}).get("val_acc"),
             best_exact_match=(best_state or {}).get("val_exact_match"),
         )
+
+        # **値はあるのに使えていないラベルを数える（#333）。**
+        # multi_class は item ごと学習から外れ、multi_label はその値だけ落ちて
+        # 「付いていない」と教えることになる。どちらも今まで数が出ていなかった。
+        unusable = {}
+        for split_name, split_items in (
+            ("train", train_items_all),
+            ("val", val_items_all),
+        ):
+            values, n_items = count_unusable(
+                split_items,
+                class_head=head,
+                head_type=head_type,
+                classes=classes,
+            )
+            found = summarize(values, n_items)
+            if found is None:
+                continue
+            unusable[split_name] = found
+            message = describe(values, n_items, where=f"{split_name} の学習・評価")
+            if message:
+                problems.append(message)
+        if unusable:
+            heads_metrics[head]["unusable_labels"] = unusable
+
         for problem in problems:
             print(f"[WARN] {head}: {problem}")
         if problems:

@@ -185,24 +185,31 @@ def _normalize_scalar_label_value(val: Any) -> Optional[str]:
     return str(val)
 
 
+def raw_label_values(val: Any) -> List[str]:
+    """**クラスで絞る前**の値を、文字列の並びにして返す（#333）。
+
+    `_normalize_multi_label_value` はこの結果から `classes` に無いものを**黙って
+    落とす**。落ちた値を数えるには、落とす前の姿が要る。**同じ解釈でなければ
+    数が合わない**ので、切り出して 1 つにしてある。
+    """
+    if val is None:
+        return []
+    if isinstance(val, (list, tuple)):
+        return [str(v).strip() for v in val if v is not None and str(v).strip()]
+    if isinstance(val, str):
+        if "," in val:
+            return [p.strip() for p in val.split(",") if p.strip()]
+        s = val.strip()
+        return [s] if s else []
+    s = str(val).strip()
+    return [s] if s else []
+
+
 def _normalize_multi_label_value(val: Any, classes: List[str]) -> Optional[List[str]]:
     if val is None:
         return None
 
-    raw_values: List[str] = []
-    if isinstance(val, list):
-        raw_values = [str(v).strip() for v in val if v is not None and str(v).strip()]
-    elif isinstance(val, tuple):
-        raw_values = [str(v).strip() for v in val if v is not None and str(v).strip()]
-    elif isinstance(val, str):
-        if "," in val:
-            raw_values = [p.strip() for p in val.split(",") if p.strip()]
-        else:
-            s = val.strip()
-            raw_values = [s] if s else []
-    else:
-        s = str(val).strip()
-        raw_values = [s] if s else []
+    raw_values = raw_label_values(val)
 
     if not classes:
         return []

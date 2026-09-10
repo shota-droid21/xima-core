@@ -17,7 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Set
 
-from label_schema import get_heads, load_schema, normalize_label_for_head
+from label_schema import get_head_classes, get_heads, load_schema, normalize_label_for_head
+from unusable_labels import summarize, unusable_values
 
 from job_progress import update_job_progress
 
@@ -144,6 +145,10 @@ def main() -> None:
     n_processed = 0
     n_skipped = 0
     n_missing_src = 0
+    # 値はあるのに、ラベルの定義に無いもの（#333）。head ごと・値ごとに数える。
+    # **落とすか残すかは変えない。** 見えていなかったことだけを直す。
+    unusable_values_by_head: Dict[str, Dict[str, int]] = {}
+    unusable_items_by_head: Dict[str, int] = {}
 
     for it in items:
         n_seen = n_processed + n_skipped + n_missing_src
@@ -171,6 +176,18 @@ def main() -> None:
         out_labels = dict(labels)
         if schema_head_map:
             for hid, head in schema_head_map.items():
+                # 正規化の**前**に数える。multi_label はここで値が落ちるので、
+                # 落ちたあとでは何が消えたか分からない（#333）。
+                bad = unusable_values(
+                    out_labels.get(hid),
+                    head_type=str(head.get("type") or ""),
+                    classes=get_head_classes(head),
+                )
+                if bad:
+                    counts = unusable_values_by_head.setdefault(hid, {})
+                    for value in bad:
+                        counts[value] = counts.get(value, 0) + 1
+                    unusable_items_by_head[hid] = unusable_items_by_head.get(hid, 0) + 1
                 out_labels[hid] = normalize_label_for_head(out_labels.get(hid), head)
         split = out_labels.get("split")
         if split is not None and not isinstance(split, str):
@@ -266,11 +283,22 @@ def main() -> None:
     with index_path.open("w", encoding="utf-8") as f:
         json.dump(index_json, f, ensure_ascii=False, indent=2)
 
+    unusable: Dict[str, Any] = {}
+    for hid, counts in unusable_values_by_head.items():
+        found = summarize(counts, unusable_items_by_head.get(hid, 0))
+        if found is not None:
+            unusable[hid] = found
+
     print("----- SUMMARY -----")
     print(f" processed:   {n_processed}")
     print(f" skipped:     {n_skipped}")
     print(f" missing src: {n_missing_src}")
     print(f" removed:     {n_removed}")
+    for hid, found in unusable.items():
+        listed = ", ".join(f"{v}({c})" for v, c in found["values"].items())
+        # skipped と混ぜない。あちらは「dataset の外にある」という正常な状態で、
+        # こちらは「入れるつもりだったのに値が壊れていて入らない」である（#333）。
+        print(f"[WARN] {hid}: 定義に無い値 {found['items']} 件 -> {listed}")
     print(f"[INFO] index.json written to: {index_path}")
     update_job_progress(
         phase="done",
@@ -283,6 +311,8 @@ def main() -> None:
             "missing_src": n_missing_src,
             "removed": n_removed,
             "index_path": str(index_path),
+            # 0 件なら {}。**黙って落とさない**ためだけの数で、処理は変えていない。
+            "schema_violations": unusable,
         },
     )
 

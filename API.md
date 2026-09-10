@@ -355,6 +355,25 @@ curl -O http://127.0.0.1:27801/workspaces/ws_test/experiments/exp1/images/by-fil
     - `infer_heads` / `infer_scores`: `run_dir`（最新 `experiments/<exp>/models/run_*`）, `index`, `output` を自動補完（`args.raw_args` に同等オプションが含まれる場合は補完しません）
   - `train_epoch` / `infer_heads` の `args.device` では `cpu|cuda|metal(mps)` を指定可能です。`auto` 相当は `cuda -> mps -> cpu` の順で自動選択されます。
 
+### ラベルの定義に無い値の報告
+
+**値はあるのに学習に使えないラベル**は、これまでどこにも件数が出ていませんでした。落ち方は head の型で違います。
+
+| head の型 | 何が起きるか |
+| --- | --- |
+| `multi_class` | その item は、その head の学習・検証から**丸ごと外れる** |
+| `multi_label` | **その値だけ**落ちる。item は学習に残るので、「その属性は付いていない」と教えることになる |
+
+**処理は変えていません。**件数が出るようになっただけです。
+
+- `apply_label` の進捗（`phase: done`）に `schema_violations`: `{ "<head>": { "items": N, "values": { "<値>": 件数 } } }`。0 件なら `{}`
+  - `labels.json` を読むので、**両方の型**を拾います
+- `train_epoch` の `run_meta.json` の `metrics.heads.<head>.unusable_labels`: `{ "train": {...}, "val": {...} }`。0 件なら鍵ごと出ません
+  - `dataset/index.json` を読むので、**`multi_class` だけ**拾います（`multi_label` の落ちた値は `apply_label` の時点で消えているため）
+  - 同じ内容が `metrics.heads.<head>.problems` にも 1 行の文章として入るので、既存の学習警告の表示にそのまま出ます
+
+`skipped` とは別の数です。`skipped` は「`split` が `train` / `val` でないため dataset の外にある」という**正常な状態**を表します。
+
 - GET `/workspaces/{ws}/experiments/{exp}/jobs/{job_id}`
   - 説明: ジョブのメタ（状態、開始・終了時刻、exit_code、progress 等）を返します。
 
