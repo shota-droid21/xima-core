@@ -193,6 +193,18 @@ curl -X PATCH http://127.0.0.1:27801/workspaces/${WS_ID}/experiments/${EXP_ID} \
 - PUT `/workspaces/{ws}/experiments/{exp}/label-input`
   - 説明: `labels.json` を**全置換（full-file overwrite）**します。PUT を受ける前に既存の `labels.json` を自動で履歴へスナップショットします。初回書き込み時は新規ファイルのスナップショットが作成されます。
   - ボディ: 新しい `labels.json`（完全な JSON）。
+  - 検証: **変更のある item だけ**をスキーマで検証します。変更のある item に不正な値があれば `400`（`detail` に位置と理由）。**変更していない item に既にある不正な値は、保存を止めません**（そのまま残ります）。ラベルの定義からクラスを消したあとでも、無関係な保存が止まらないようにするためです。
+  - 応答: `status` / `path` / `backup` / `revision` に加えて、`schema_violations`（残っている不正な値の head ごとの件数。無ければ `{}`）。
+
+- GET `/workspaces/{ws}/experiments/{exp}/label-input/schema-violations`
+  - 説明: いまの `labels.json` にある**スキーマ外の値**を数えます。保存しなくても件数が分かります。
+  - 応答: `heads`（head ごとの件数）と `items`（不正な値を 1 つ以上持つ item の数）。
+  - 例:
+
+```bash
+curl -s http://127.0.0.1:27801/workspaces/ws_test/experiments/exp1/label-input/schema-violations | jq .
+# => { "workspace": "ws_test", "experiment": "exp1", "heads": { "character": 19 }, "items": 19 }
+```
 
 - GET `/workspaces/{ws}/experiments/{exp}/label-schema`
   - 説明: ラベルスキーマ JSON (`label_input/label_schema.json`) を取得します。実験作成時または初回取得時に `DEFAULT_LABEL_SCHEMA` を元にファイルを生成します（デフォルトは固定 `split` ヘッドのみ。その他のヘッドはユーザが `label_schema.json` を編集して追加・削除できます）。

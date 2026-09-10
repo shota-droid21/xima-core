@@ -10,6 +10,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, Body, HTTPException
 
 from .config import ConfigManager
+from .label_input_partial import count_schema_violations, normalize_tolerating_unchanged
 from .utils.atomic_io import write_json_atomic, write_text_atomic
 from .utils.legacy import PATH_KEYS, normalize_to_source_rel
 
@@ -55,6 +56,20 @@ def load_label_json(label_path: Path) -> Dict[str, Any]:
         return json.loads(label_path.read_text())
     except json.JSONDecodeError as exc:
         raise ValueError(f"Invalid JSON: {label_path}") from exc
+
+
+def _current_items(label_path: Path) -> list[Any]:
+    """いまディスクにある items。読めなければ空（＝すべて「変更あり」扱い）。
+
+    #332 で「変更が無い item は厳格に検証しない」を決めるための材料。**読めない
+    ときは何も緩めない**（空を返せば、どの item も unchanged にならない）。
+    """
+    try:
+        data = load_label_json(label_path)
+    except (FileNotFoundError, ValueError, OSError):
+        return []
+    items = data.get("items")
+    return items if isinstance(items, list) else []
 
 
 def _coerce_int(value: Any) -> int | None:
@@ -780,6 +795,39 @@ def create_label_input_router(config_manager: ConfigManager) -> APIRouter:
             "revision": label_revision(label_path),
         }
 
+    @router.get(
+        "/workspaces/{workspace}/experiments/{experiment}/label-input/schema-violations"
+    )
+    def get_schema_violations_scoped(workspace: str, experiment: str) -> Dict[str, Any]:
+        """スキーマ外の値を持つ item の件数（#332）。
+
+        **`GET /label-input` の本文には足せない。** app は取得した文書をそのまま
+        PUT へ渡すので、本文に足した鍵は `labels.json` へ書き戻されてしまう。
+        数えるためだけの口を分ける。
+
+        `heads` は head ごとの件数。`items` は違反を 1 つ以上持つ item の数。
+        """
+        cfg = config_manager.get_config()
+        try:
+            label_path = cfg.label_input_path_for(workspace, experiment)
+            schema_path = ensure_label_schema_file(cfg, workspace, experiment)
+            schema = normalize_label_schema_payload(load_label_json(schema_path))
+            validate_label_schema_payload(schema)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        heads, items = count_schema_violations(
+            _current_items(label_path),
+            schema,
+            normalize=normalize_label_input_payload_with_schema,
+        )
+        return {
+            "workspace": workspace.strip(),
+            "experiment": experiment.strip(),
+            "heads": heads,
+            "items": items,
+        }
+
     @router.put("/workspaces/{workspace}/experiments/{experiment}/label-input")
     def put_label_input_scoped(
         workspace: str,
@@ -802,10 +850,17 @@ def create_label_input_router(config_manager: ConfigManager) -> APIRouter:
             validate_label_schema_payload(normalized_schema)
 
             normalized = normalize_label_payload(payload, cfg, workspace=workspace)
+            violations: Dict[str, int] = {}
             if isinstance(normalized, dict):
                 normalized = sort_label_input_items(normalized)
-                normalized = normalize_label_input_payload_with_schema(
-                    normalized, normalized_schema
+                # **変更のある item だけ厳格に検証する（#332）。**
+                # 触っていない item の違反で、無関係な保存まで止めない。
+                # 残った違反は件数で返す（黙って残さない）。
+                normalized, violations = normalize_tolerating_unchanged(
+                    normalized,
+                    normalized_schema,
+                    _current_items(label_path),
+                    normalize=normalize_label_input_payload_with_schema,
                 )
                 normalized = normalize_label_thumb_paths(
                     normalized, workspace=workspace, experiment=experiment
@@ -840,6 +895,8 @@ def create_label_input_router(config_manager: ConfigManager) -> APIRouter:
             # 保存した直後の版。app はこれを控えて、次の保存前の突き合わせに使う。
             # 返さないと、自分の保存で版が動いたことを「core が進んだ」と誤検知する。
             "revision": label_revision(label_path),
+            # 触っていない item に残っているスキーマ外の値（#332）。空なら {}。
+            "schema_violations": violations,
         }
 
     @router.get("/workspaces/{workspace}/experiments/{experiment}/label-input/history")
