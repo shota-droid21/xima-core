@@ -20,9 +20,18 @@ _CANONICAL_HEAD_TYPES = {"multi_class", "multi_label"}
 _HEAD_TYPE_ALIASES = {"single_class": "multi_class"}
 _HEAD_ID_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]*$")
 _SPLIT_HEAD_ID = "split"
-_SPLIT_CHOICES = ("train", "val", "unassigned")
+#: 人が書ける `split` の値（#325 / Decision 045）。**`unassigned` は廃止した。**
+#: 判定の正本は `pipeline/dataset_split.py`。process が分かれているので写している。
+_SPLIT_CHOICES = ("train", "val", "exclude")
+#: 旧い値の読み替え。`None` は「キーごと落とす」＝ **自動**（ラベルがあれば学習に入る）。
+#: `ignore` だけ `exclude` にするのは、語が「外す」を意味するからである。自動へ寄せると
+#: **外したつもりのものが黙って学習に入る**。
 # NOTE: remove this mapping when legacy values are fully dropped.
-_LEGACY_SPLIT_ALIASES = {"ignore": "unassigned", "delete": "unassigned"}
+_LEGACY_SPLIT_ALIASES: dict[str, str | None] = {
+    "unassigned": None,
+    "ignore": "exclude",
+    "delete": None,
+}
 _DEFAULT_THUMB_WIDTH = 256
 
 
@@ -261,6 +270,8 @@ def _normalize_split_label_value(
         return None, False
     normalized = normalized.lower()
     if normalized in _LEGACY_SPLIT_ALIASES:
+        # `None` を返すとキーごと落ちる（呼び出し側が None を書かない）。
+        # それが `unassigned` の移行そのものである（Decision 045-3）。
         return _LEGACY_SPLIT_ALIASES[normalized], normalized == "delete"
     if normalized not in _SPLIT_CHOICES:
         allowed = ",".join(_SPLIT_CHOICES)

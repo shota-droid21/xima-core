@@ -285,14 +285,14 @@ def test_scope_labeled_unassigned_filters_end_to_end(tmp_path, monkeypatch):
         cfg,
         items,
         {
-            # 項目に値があり split が無い → 残る
-            "img_0": {"shape": "a"},
-            "img_1": {"shape": "b", "split": "unassigned"},
-            # 学習に入っている → 除く
-            "img_2": {"shape": "a", "split": "train"},
-            "img_3": {"shape": "a", "split": "val"},
+            # 項目に値があり、人が学習から外した → 残る（#325 で意味が変わった）
+            "img_0": {"shape": "a", "split": "exclude"},
+            "img_1": {"shape": "b", "split": "ignore"},
+            # 書かなければ学習に入る → 除く
+            "img_2": {"shape": "a"},
+            "img_3": {"shape": "a", "split": "train"},
             # split だけ → ラベル済みではない
-            "img_4": {"split": "unassigned"},
+            "img_4": {"split": "exclude"},
         },
     )
     _write_cache(cfg, "ViT-B/32")

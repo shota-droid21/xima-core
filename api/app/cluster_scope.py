@@ -6,13 +6,17 @@
 | --- | --- |
 | `all` | 全部。labels.json を読まない |
 | `unlabeled` | 指定 head にまだ値が無いもの（削除マークは除く） |
-| `labeled_unassigned` | **いずれかの項目に値があり、学習に入っていないもの** |
+| `labeled_unassigned` | **いずれかの項目に値があり、学習から外したもの（`split=exclude`）** |
 
-`labeled_unassigned` が #316 で足りないと分かったもの。ラベルを付けても `split` が
-`train` / `val` でなければデータセットに入らない（`apply_label_mapping.py:183`）が、
-`split` を付ける機会が付与の流れの中に無かった。クラスタのまとめ付与は項目だけを書く
-（#293 で意図的にそうした）ため、本番相当の experiment では**項目に値がある 1,042 件の
-うち 766 件（73.5%）が学習に入っていなかった**。この scope はその 766 件を拾う。
+`labeled_unassigned` は #316 で作った。当時は `split` が `train` / `val` でなければ
+データセットに入らず、本番相当の experiment では**項目に値がある 1,042 件のうち
+766 件（73.5%）が学習に入っていなかった**。この scope はその 766 件を拾うためのもの
+だった。
+
+**既定が反転したので（#325 / Decision 045）、拾う対象が変わった。** いまはラベルが
+あれば `split` を書かなくても学習に入るので、「ラベルがあるのに入らない」のは
+**人が `exclude` と書いたものだけ**である。id はそのままにして意味だけ移した ——
+id は URL に出ており（#336 で共有できるようにした）、変えると壊すものが増える。
 
 **ルータから分けている理由。** `clustering.py` は埋め込みの読み込みと応答の整形が本体で、
 そこに labels.json の解釈が混ざると、どちらを直しているのか分からなくなる。scope が
@@ -42,9 +46,10 @@ SCOPES = (SCOPE_ALL, SCOPE_UNLABELED, SCOPE_LABELED_UNASSIGNED)
 
 SPLIT_HEAD_ID = "split"
 
-# 学習・検証データに入る `split`。`apply_label_mapping.py:183` と同じ境界。
-# ここから外れるのは `unassigned` と、値が無いもの（`None`）。
-_IN_DATASET_SPLITS = ("train", "val")
+#: 学習から外すと**人が決めた**値。判定の正本は `pipeline/dataset_split.py`。
+#: 旧値 `ignore` も同じ意味なので拾う。`unassigned` は廃止され「自動」になったので
+#: **ここには入らない**（＝この scope に出てこない）。
+_EXCLUDED_SPLITS = ("exclude", "ignore")
 
 # 「値が無い」の判定。`_unlabeled_exclusions`（#293）から引き継いでいる。
 _EMPTY_VALUES = (None, "", [], {})
@@ -143,16 +148,19 @@ def _labeled_unassigned_ids(items: list[Dict[str, Any]]) -> Set[str]:
     残すのは次を**すべて**満たすもの。
 
     1. `split` 以外のいずれかの head に値がある（＝ラベル済み）
-    2. `split` が `train` でも `val` でもない（＝学習に入っていない）
+    2. `split` が `exclude`（＝**人が学習から外した**）
     3. 削除マークが付いていない
+
+    **2 は #325 で反転した。** 以前は「`train` でも `val` でもない」であり、
+    `split` を書き忘れただけの item がここへ大量に出ていた。いまは書かなければ
+    学習に入るので、**出るのは意図して外したものだけ**である。
 
     3 を条件に入れるのは #293 と同じ理由である。**消すと決めた画像は「学習へ入れ
     られる候補」ではない。** 削除マークが付いていれば `apply_label_mapping` も
     `split` に関係なく捨てるので、ここに出しても救えない。
 
     1 で `split` を除くのは、`split` だけが付いた item を「ラベル済み」と呼べない
-    ため。`split=unassigned` は**値が入っているが項目は空**という状態で、これを
-    含めると `unlabeled` とほぼ同義の集合になる。
+    ためである。
     """
     keep: Set[str] = set()
     for item in items:
@@ -164,7 +172,7 @@ def _labeled_unassigned_ids(items: list[Dict[str, Any]]) -> Set[str]:
 
         labels = _labels(item)
         split = labels.get(SPLIT_HEAD_ID)
-        if isinstance(split, str) and split.strip().lower() in _IN_DATASET_SPLITS:
+        if not (isinstance(split, str) and split.strip().lower() in _EXCLUDED_SPLITS):
             continue
 
         has_label = any(

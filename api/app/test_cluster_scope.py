@@ -67,12 +67,19 @@ def _kept(cfg, items_ids: list[str], scope: str, head_id: str | None = None):
     return [fid for fid in items_ids if keep(fid)]
 
 
-def test_labeled_unassigned_keeps_labeled_items_without_split(tmp_path: Path) -> None:
-    """#316 の本体。**項目に値があるのに `split` が無い**ものを拾う。"""
+def test_labeled_unassigned_keeps_only_items_excluded_on_purpose(
+    tmp_path: Path,
+) -> None:
+    """**人が `exclude` と書いたものだけ**を拾う（#325 で反転）。
+
+    以前は「`split` が無い」を拾っていた。既定が反転して、書かなければ学習に
+    入るようになったので、**書き忘れはもうここに出ない**。
+    """
     cfg = _cfg(
         tmp_path,
         [
-            _item("keep_no_split", {"shape": "a"}),
+            _item("keep_excluded", {"shape": "a", "split": "exclude"}),
+            _item("skip_no_split", {"shape": "a"}),
             _item("skip_train", {"shape": "a", "split": "train"}),
             _item("skip_val", {"shape": "a", "split": "val"}),
             _item("skip_unlabeled", {}),
@@ -80,34 +87,32 @@ def test_labeled_unassigned_keeps_labeled_items_without_split(tmp_path: Path) ->
     )
     kept = _kept(
         cfg,
-        ["keep_no_split", "skip_train", "skip_val", "skip_unlabeled"],
+        ["keep_excluded", "skip_no_split", "skip_train", "skip_val", "skip_unlabeled"],
         cluster_scope.SCOPE_LABELED_UNASSIGNED,
     )
-    assert kept == ["keep_no_split"]
+    assert kept == ["keep_excluded"]
 
 
-def test_labeled_unassigned_treats_unassigned_split_as_outside_dataset(
-    tmp_path: Path,
-) -> None:
-    """`split=unassigned` は学習に入らない。`None` と同じ扱いにする。
+def test_labeled_unassigned_does_not_keep_legacy_unassigned(tmp_path: Path) -> None:
+    """`split=unassigned` は廃止され、**キー無しと同じ（自動）**になった（#325）。
 
-    `apply_label_mapping.py` は `split not in ("train","val")` で捨てるので、
-    `unassigned` も `None` も結果は同じである。片方だけ拾うと 766 件の一部が
-    絞り込みから漏れる。
+    ここに出すと「外したもの」に書き忘れが混ざる。旧値 `ignore` は逆で、語が
+    「外す」を意味するので拾う。
     """
     cfg = _cfg(
         tmp_path,
         [
-            _item("keep_unassigned", {"shape": "a", "split": "unassigned"}),
-            _item("keep_none", {"shape": "a"}),
+            _item("skip_unassigned", {"shape": "a", "split": "unassigned"}),
+            _item("skip_none", {"shape": "a"}),
+            _item("keep_legacy_ignore", {"shape": "a", "split": "ignore"}),
         ],
     )
     kept = _kept(
         cfg,
-        ["keep_unassigned", "keep_none"],
+        ["skip_unassigned", "skip_none", "keep_legacy_ignore"],
         cluster_scope.SCOPE_LABELED_UNASSIGNED,
     )
-    assert kept == ["keep_unassigned", "keep_none"]
+    assert kept == ["keep_legacy_ignore"]
 
 
 def test_labeled_unassigned_ignores_split_only_items(tmp_path: Path) -> None:
@@ -118,7 +123,7 @@ def test_labeled_unassigned_ignores_split_only_items(tmp_path: Path) -> None:
     cfg = _cfg(
         tmp_path,
         [
-            _item("split_only", {"split": "unassigned"}),
+            _item("split_only", {"split": "exclude"}),
             _item("empty_labels", {}),
             _item("no_labels_key"),
         ],
@@ -140,8 +145,8 @@ def test_labeled_unassigned_excludes_delete_marked(tmp_path: Path) -> None:
     cfg = _cfg(
         tmp_path,
         [
-            _item("marked", {"shape": "a"}, delete=True),
-            _item("kept", {"shape": "a"}),
+            _item("marked", {"shape": "a", "split": "exclude"}, delete=True),
+            _item("kept", {"shape": "a", "split": "exclude"}),
         ],
     )
     kept = _kept(
@@ -158,8 +163,8 @@ def test_labeled_unassigned_accepts_value_in_any_head(tmp_path: Path) -> None:
     cfg = _cfg(
         tmp_path,
         [
-            _item("other_head", {"color": "red"}),
-            _item("multi_label_head", {"color": ["red", "blue"]}),
+            _item("other_head", {"color": "red", "split": "exclude"}),
+            _item("multi_label_head", {"color": ["red", "blue"], "split": "exclude"}),
         ],
         heads=[
             {"id": "split", "type": "split", "choices": ["train", "val"]},
@@ -181,9 +186,9 @@ def test_labeled_unassigned_ignores_empty_values(tmp_path: Path) -> None:
     cfg = _cfg(
         tmp_path,
         [
-            _item("empty_string", {"shape": ""}),
-            _item("empty_list", {"color": []}),
-            _item("has_value", {"shape": "a"}),
+            _item("empty_string", {"shape": "", "split": "exclude"}),
+            _item("empty_list", {"color": [], "split": "exclude"}),
+            _item("has_value", {"shape": "a", "split": "exclude"}),
         ],
         heads=[
             {"id": "split", "type": "split", "choices": ["train", "val"]},

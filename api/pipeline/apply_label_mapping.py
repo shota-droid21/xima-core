@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Set
 
+from dataset_split import DEFAULT_VAL_RATIO, resolve_split
 from label_schema import get_head_classes, get_heads, load_schema, normalize_label_for_head
 from unusable_labels import summarize, unusable_values
 
@@ -79,6 +80,17 @@ def main() -> None:
         ),
     )
 
+    parser.add_argument(
+        "--val-ratio",
+        type=float,
+        default=DEFAULT_VAL_RATIO,
+        help=(
+            "split を書いていない item のうち val へ回す割合 (既定: "
+            f"{DEFAULT_VAL_RATIO})。file_id のハッシュで決めるので、"
+            "何度回しても同じ item は同じ側に入る (#325)"
+        ),
+    )
+
     args = parser.parse_args()
 
     update_job_progress(phase="start", message="starting apply_label_mapping")
@@ -87,6 +99,7 @@ def main() -> None:
     root_dir = Path(args.root).resolve()
     dataset_root = Path(args.dataset_root).resolve()
     class_head = args.class_head
+    val_ratio = min(max(float(args.val_ratio), 0.0), 1.0)
 
     # load schema if available
     schema = None
@@ -149,6 +162,9 @@ def main() -> None:
     # **落とすか残すかは変えない。** 見えていなかったことだけを直す。
     unusable_values_by_head: Dict[str, Dict[str, int]] = {}
     unusable_items_by_head: Dict[str, int] = {}
+    #: dataset へ入らなかった理由の内訳（`deleted` / `excluded` / `unlabeled` /
+    #: `invalid_split`）。`skipped` の総数だけでは何が起きたか読めない。
+    skipped_reasons: Dict[str, int] = {}
 
     for it in items:
         n_seen = n_processed + n_skipped + n_missing_src
@@ -176,11 +192,19 @@ def main() -> None:
         out_labels = dict(labels)
         if schema_head_map:
             for hid, head in schema_head_map.items():
+                head_type = str(head.get("type") or "")
+                # `split` はデータ管理用の system head で、学習するものではない
+                # （Decision 011）。値の正否は `dataset_split` が決めるので、
+                # ここで数えると **`exclude` が「定義に無い値」として出てしまう**
+                # （既存のスキーマは choices に `unassigned` を持っている）。
+                if hid == "split" or head_type == "split":
+                    out_labels[hid] = normalize_label_for_head(out_labels.get(hid), head)
+                    continue
                 # 正規化の**前**に数える。multi_label はここで値が落ちるので、
                 # 落ちたあとでは何が消えたか分からない（#333）。
                 bad = unusable_values(
                     out_labels.get(hid),
-                    head_type=str(head.get("type") or ""),
+                    head_type=head_type,
                     classes=get_head_classes(head),
                 )
                 if bad:
@@ -189,17 +213,27 @@ def main() -> None:
                         counts[value] = counts.get(value, 0) + 1
                     unusable_items_by_head[hid] = unusable_items_by_head.get(hid, 0) + 1
                 out_labels[hid] = normalize_label_for_head(out_labels.get(hid), head)
-        split = out_labels.get("split")
-        if split is not None and not isinstance(split, str):
-            split = str(split)
-        if isinstance(split, str):
-            split = split.strip().lower()
-            out_labels["split"] = split
-        deleted = it.get("delete", False)
+        deleted = bool(it.get("delete", False))
 
-        if deleted or split not in ("train", "val"):
+        # **ラベルがあれば入る**（#325 / Decision 045）。規則は dataset_split に
+        # 1 つだけ置いてある。ここで判定を書き足さない。
+        split_key = str(it.get("file_id") or source_path)
+        split, split_source = resolve_split(
+            out_labels,
+            deleted=deleted,
+            key=split_key,
+            head_ids=schema_heads,
+            val_ratio=val_ratio,
+        )
+        if split is None:
             n_skipped += 1
+            skipped_reasons[split_source] = skipped_reasons.get(split_source, 0) + 1
             continue
+        # 自動で決めた分は labels.json へ書き戻さない。**書くと「人が決めた」と
+        # 区別できなくなる。** index.json にだけ残す。
+        out_labels.pop("split", None)
+        if split_source == "pinned":
+            out_labels["split"] = split
 
         src = root_dir / source_path
         if not src.exists():
@@ -220,6 +254,7 @@ def main() -> None:
                 "dataset_path": str(dst.relative_to(dataset_root)),
                 "source_path": str(source_path),
                 "split": split,
+                "split_source": split_source,
                 "delete": bool(deleted),
                 "labels": out_labels,
             }
@@ -272,6 +307,8 @@ def main() -> None:
             "source_label_path": str(labels_path),
             "class_head": class_head,
             "created_at": datetime.now().isoformat(),
+            # 自動割りを再現できるようにする（#325）。item ごとの `split_source` と対。
+            "val_ratio": val_ratio,
             "version": 2,
         },
         "items": index_items,
@@ -292,6 +329,10 @@ def main() -> None:
     print("----- SUMMARY -----")
     print(f" processed:   {n_processed}")
     print(f" skipped:     {n_skipped}")
+    for reason, count in sorted(skipped_reasons.items()):
+        print(f"   - {reason}: {count}")
+    n_auto = sum(1 for it in index_items if it.get("split_source") == "auto")
+    print(f" auto split:  {n_auto} (val_ratio={val_ratio})")
     print(f" missing src: {n_missing_src}")
     print(f" removed:     {n_removed}")
     for hid, found in unusable.items():
@@ -310,6 +351,8 @@ def main() -> None:
             "skipped": n_skipped,
             "missing_src": n_missing_src,
             "removed": n_removed,
+            "skipped_reasons": skipped_reasons,
+            "val_ratio": val_ratio,
             "index_path": str(index_path),
             # 0 件なら {}。**黙って落とさない**ためだけの数で、処理は変えていない。
             "schema_violations": unusable,

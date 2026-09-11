@@ -50,7 +50,7 @@ def test_normalize_label_input_payload_with_schema_normalizes_values() -> None:
     assert labels["tags"] == ["cute", "cool"]
 
 
-def test_normalize_label_input_payload_with_schema_maps_legacy_ignore_to_unassigned() -> None:
+def test_normalize_label_input_payload_with_schema_maps_legacy_ignore_to_exclude() -> None:
     payload = {
         "items": [
             {
@@ -65,7 +65,8 @@ def test_normalize_label_input_payload_with_schema_maps_legacy_ignore_to_unassig
     item = normalized["items"][0]
     labels = item["labels"]
 
-    assert labels["split"] == "unassigned"
+    # `ignore` は語が「外す」を意味するので `exclude` として読む（#325）。
+    assert labels["split"] == "exclude"
     assert item.get("delete") is None
 
 
@@ -84,7 +85,8 @@ def test_normalize_label_input_payload_with_schema_maps_legacy_delete_to_flag() 
     item = normalized["items"][0]
     labels = item["labels"]
 
-    assert labels["split"] == "unassigned"
+    # `delete` の意味は削除マークが担うので、`split` はキーごと落ちる（#325）。
+    assert "split" not in labels
     assert item["delete"] is True
 
 
