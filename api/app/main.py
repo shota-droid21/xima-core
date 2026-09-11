@@ -9,6 +9,7 @@ from .auth_mode import AUTH_MODE_EXTERNAL, AUTH_MODE_LOCAL, resolve_agent_auth_m
 from .auth_jwt import require_auth_with_whitelist
 from .local_mode import local_cors_origins, mount_app_static, setup_local_mode
 from .clustering import create_clustering_router
+from .compression import TypeAwareGZipMiddleware
 from .dataset_preview_api import create_dataset_preview_router
 from .schema_impact_api import create_schema_impact_router
 from .config import ConfigManager
@@ -47,6 +48,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 応答を圧縮する（#363）。**CORS より後に足す** —— あとに足したものが外側に来るので、
+# 圧縮は CORS がヘッダを付け終わったあとの応答に掛かる。
+# 圧縮してよい型だけを見る理由は `compression.py` にある（サムネイルを再圧縮しない）。
+app.add_middleware(TypeAwareGZipMiddleware)
 
 base_dir = Path(__file__).resolve().parent.parent
 config_manager = ConfigManager(base_dir)
