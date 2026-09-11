@@ -10,6 +10,7 @@ from .auth_jwt import require_auth_with_whitelist
 from .local_mode import local_cors_origins, mount_app_static, setup_local_mode
 from .clustering import create_clustering_router
 from .dataset_preview_api import create_dataset_preview_router
+from .schema_impact_api import create_schema_impact_router
 from .config import ConfigManager
 from .demo import create_demo_router
 from .embeddings import create_embeddings_router
@@ -61,6 +62,7 @@ app.include_router(create_jobs_router(jobs_manager))
 app.include_router(create_demo_router(config_manager, jobs_manager))
 app.include_router(create_clustering_router(config_manager))
 app.include_router(create_dataset_preview_router(config_manager))
+app.include_router(create_schema_impact_router(config_manager))
 app.include_router(create_embeddings_router(config_manager))
 app.include_router(create_entitlement_router(config_manager))
 

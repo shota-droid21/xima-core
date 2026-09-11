@@ -35,6 +35,24 @@ _LEGACY_SPLIT_ALIASES: dict[str, str | None] = {
 _DEFAULT_THUMB_WIDTH = 256
 
 
+def _orphans_after_schema_change(
+    cfg, workspace: str, experiment: str, new_schema: Any, old_schema: Any
+) -> Dict[str, Any]:
+    """スキーマ変更で行き先を失った値の件数（#330）。
+
+    **数えられなくても保存は成功させる。** ここで落ちると、ラベルが 1 件も無い
+    experiment でスキーマを保存できなくなる。
+    """
+    from .schema_impact import orphans
+
+    try:
+        data = load_label_json(cfg.label_input_path_for(workspace, experiment))
+        items = [it for it in (data.get("items") or []) if isinstance(it, dict)]
+    except (FileNotFoundError, ValueError, OSError):
+        return {"heads": [], "items": 0, "entering": 0}
+    return orphans(items, new_schema, old_schema=old_schema)
+
+
 def label_revision(label_path: Path) -> str:
     """labels.json の版を表す文字列（#294）。
 
@@ -539,6 +557,11 @@ def _write_history_snapshot(label_path: Path, serialized: str) -> Path:
     return backup_path
 
 
+#: 同じパッケージの他モジュールから使う口（#330 の付け替えも履歴へ残すため）。
+#: **履歴を残す作法を 2 つに分けない。**
+write_history_snapshot = _write_history_snapshot
+
+
 def _list_history_backups(target_path: Path) -> list[Dict[str, Any]]:
     history_dir = target_path.parent / "history"
     if not history_dir.exists():
@@ -707,6 +730,16 @@ def create_label_input_router(config_manager: ConfigManager) -> APIRouter:
 
         normalized_schema = normalize_label_schema_payload(payload)
         validate_label_schema_payload(normalized_schema)
+
+        # 書き換える**前**のスキーマ。何が消えたかを言うために要る（#330）。
+        previous_schema = None
+        try:
+            previous_schema = normalize_label_schema_payload(
+                load_label_json(schema_path)
+            )
+        except (FileNotFoundError, ValueError):
+            previous_schema = None
+
         serialized = json.dumps(normalized_schema, ensure_ascii=False, indent=2)
         write_text_atomic(schema_path, serialized)
         version_path = _write_history_snapshot(schema_path, serialized)
@@ -716,6 +749,12 @@ def create_label_input_router(config_manager: ConfigManager) -> APIRouter:
             "version": str(version_path),
             "workspace": workspace.strip(),
             "experiment": experiment.strip(),
+            # **止めないが、黙らない**（#330）。行き先を失った値があれば件数を返す。
+            # 画面は保存の前に `label-schema/impact` で聞くが、script から直接
+            # 叩いたときにも気づけるようにしておく。
+            "orphans": _orphans_after_schema_change(
+                cfg, workspace, experiment, normalized_schema, previous_schema
+            ),
         }
 
     @router.get("/workspaces/{workspace}/experiments/{experiment}/label-schema/history")

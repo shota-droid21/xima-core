@@ -12,36 +12,16 @@ experiment では「入る件数」が突然増える**。本番相当のデー�
 `apply_label_mapping` が実際に作る中身と食い違い、**先に出した数字が嘘になる**。
 process が分かれているだけで、規則は 1 つである（#333 と同じ立場）。
 
-`sys.path` は触らない。pipeline を丸ごと import 可能にすると、`label_schema` の
-ような名前が app 側の import と衝突しうる。**ファイルを名指しで 1 つだけ**読む。
+読み込みの作法は `pipeline_modules.py` にある。
 """
 
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-_PIPELINE_DIR = Path(__file__).resolve().parent.parent / "pipeline"
+from .pipeline_modules import load_pipeline_module
 
-
-def _load_dataset_split():
-    """`pipeline/dataset_split.py` を、sys.path を汚さずに読み込む。
-
-    このモジュールが flat import（`from label_schema import ...`）を持つように
-    なったらここで落ちる。**そのときは規則の置き場を見直す合図**で、黙って
-    数え方を写し直してはいけない。
-    """
-    path = _PIPELINE_DIR / "dataset_split.py"
-    spec = importlib.util.spec_from_file_location("xima_dataset_split", path)
-    if spec is None or spec.loader is None:  # pragma: no cover - 構成の破損
-        raise ImportError(f"cannot load {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-dataset_split = _load_dataset_split()
+dataset_split = load_pipeline_module("dataset_split")
 
 #: 反転する**前**に学習へ入っていた `split`。差分を出すためだけに要る。
 _OLD_RULE_SPLITS = ("train", "val")
