@@ -107,6 +107,14 @@ if ! "$PY_BIN" -c "import venv" >/dev/null 2>&1; then
     Debian/Ubuntu:  apt install python3-venv"
 fi
 
+# workspace のバックアップ / 復元だけが tar + zstd を使う（#385）。
+# **止めない。** 無くてもラベリングと学習は動くため、警告に留める。
+if ! command -v zstd >/dev/null 2>&1; then
+  info "zstd が見つかりません。workspace のバックアップ / 復元だけが使えません"
+  info "  macOS:  brew install zstd"
+  info "  Linux:  apt install zstd  など"
+fi
+
 # ------------------------------------------------------------------ 2) venv
 
 step "[2/5] Python 環境を用意します"

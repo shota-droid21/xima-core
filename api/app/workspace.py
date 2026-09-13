@@ -4,8 +4,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
-import tarfile
 import tempfile
 import threading
 import time
@@ -30,6 +28,14 @@ from .utils.short_id import (
     require_short_id,
     require_workspace_id,
 )
+from .workspace_archive import (
+    ARCHIVE_EXT,
+    ArchiveToolsMissing,
+    create_workspace_backup_archive,
+    extract_archive_into_dir,
+    missing_archive_tools,
+    read_workspace_meta_from_archive,
+)
 from .utils.sidebar_order import (
     apply_order_with_fallback,
     load_sidebar_order,
@@ -38,7 +44,7 @@ from .utils.sidebar_order import (
 
 
 _BACKUP_ID_RE = re.compile(r"^\d{8}_\d{6}(?:-\d+)?$")
-_WORKSPACE_BACKUP_EXT = ".tar.zst"
+_WORKSPACE_BACKUP_EXT = ARCHIVE_EXT
 _WORKSPACE_BACKUP_JOB_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 
 
@@ -194,142 +200,16 @@ def _reserved_workspace_ids_in_trash(trash_root: Path) -> set[str]:
     return reserved
 
 
-def _normalize_archive_member_name(name: str) -> Path:
-    cleaned = (name or "").strip().replace("\\", "/")
-    while cleaned.startswith("./"):
-        cleaned = cleaned[2:]
-    if not cleaned:
-        raise ValueError("archive contains empty entry name")
-    if cleaned.startswith("/"):
-        raise ValueError(f"archive entry is absolute path: {name}")
-    parts = Path(cleaned).parts
-    if any(part in ("", ".", "..") for part in parts):
-        raise ValueError(f"archive entry has invalid path: {name}")
-    return Path(*parts)
+def _require_archive_tools_or_503() -> None:
+    """`tar` / `zstd` が無ければ、**ジョブを作る前に**止める（#385）。
 
-
-def _read_workspace_meta_from_archive(archive_path: Path) -> dict[str, Any]:
-    cmd = [
-        "tar",
-        "--use-compress-program",
-        "zstd -dc",
-        "-xOf",
-        str(archive_path),
-        "workspace.json",
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    except FileNotFoundError:
-        raise ValueError("tar or zstd is not installed on the agent")
-
-    if result.returncode != 0:
-        detail = (result.stderr or "").strip() or "workspace.json not found"
-        raise ValueError(f"invalid backup archive: {detail}")
-
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"workspace.json is not valid JSON: {exc.msg}")
-
-    if not isinstance(payload, dict):
-        raise ValueError("workspace.json must be a JSON object")
-
-    raw_workspace_id = str(
-        payload.get("workspace_id") or payload.get("id") or ""
-    ).strip()
-    if not raw_workspace_id:
-        raise ValueError("workspace.json does not contain workspace_id")
-
-    try:
-        workspace_id = require_workspace_id(raw_workspace_id)
-    except ValueError as exc:
-        raise ValueError(str(exc))
-
-    return {"workspace_id": workspace_id, "workspace_json": payload}
-
-
-def _extract_archive_into_dir(archive_path: Path, staging_dir: Path) -> None:
-    try:
-        zstd_proc = subprocess.Popen(
-            ["zstd", "-dc", str(archive_path)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    except FileNotFoundError:
-        raise ValueError("zstd is not installed on the agent")
-
-    try:
-        if zstd_proc.stdout is None:
-            raise ValueError("failed to read backup archive stream")
-        with tarfile.open(fileobj=zstd_proc.stdout, mode="r|") as tar:
-            for member in tar:
-                relative = _normalize_archive_member_name(member.name)
-                destination = (staging_dir / relative).resolve()
-                if not is_subpath(staging_dir, destination):
-                    raise ValueError(f"archive path escapes staging dir: {member.name}")
-
-                if member.isdir():
-                    destination.mkdir(parents=True, exist_ok=True)
-                    continue
-
-                if member.issym() or member.islnk() or member.isdev():
-                    raise ValueError(
-                        f"unsupported archive entry type for restore: {member.name}"
-                    )
-
-                if not member.isfile():
-                    continue
-
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                src = tar.extractfile(member)
-                if src is None:
-                    raise ValueError(f"failed to extract file: {member.name}")
-                with src, destination.open("wb") as dst:
-                    shutil.copyfileobj(src, dst)
-    except tarfile.TarError as exc:
-        zstd_proc.kill()
-        raise ValueError(f"invalid tar archive: {exc}") from exc
-    except Exception:
-        zstd_proc.kill()
-        raise
-    finally:
-        if zstd_proc.stdout is not None:
-            zstd_proc.stdout.close()
-
-    stderr = b""
-    if zstd_proc.stderr is not None:
-        stderr = zstd_proc.stderr.read() or b""
-        zstd_proc.stderr.close()
-    rc = zstd_proc.wait()
-    if rc != 0:
-        detail = stderr.decode("utf-8", errors="ignore").strip()
-        raise ValueError(detail or "failed to decompress backup archive")
-
-
-def _create_workspace_backup_archive(
-    *,
-    workspace_root: Path,
-    archive_path: Path,
-    members: list[str],
-) -> None:
-    cmd = [
-        "tar",
-        "--use-compress-program",
-        "zstd -T0 -19",
-        "-C",
-        str(workspace_root),
-        "-cf",
-        str(archive_path),
-        *members,
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    except FileNotFoundError:
-        raise ValueError("tar or zstd is not installed on the agent")
-
-    if result.returncode != 0:
-        detail = (result.stderr or "").strip() or "backup command failed"
-        raise ValueError(detail)
+    `tar` はあるが `zstd` が無い環境では `FileNotFoundError` が起きない。
+    `tar` が子プロセスを見つけられず status 127 で落ちるため、走らせてからしか
+    失敗が分からなかった。ここで止めれば、押した時点で理由が返る。
+    """
+    missing = missing_archive_tools()
+    if missing:
+        raise HTTPException(status_code=503, detail=str(ArchiveToolsMissing(missing)))
 
 
 def create_workspace_router(config_manager: ConfigManager) -> APIRouter:
@@ -521,7 +401,7 @@ def create_workspace_router(config_manager: ConfigManager) -> APIRouter:
             job["progress"] = {"percent": 50, "message": "creating archive"}
             _save_workspace_backup_job(job)
 
-            _create_workspace_backup_archive(
+            create_workspace_backup_archive(
                 workspace_root=root,
                 archive_path=archive_tmp_path,
                 members=members,
@@ -627,7 +507,7 @@ def create_workspace_router(config_manager: ConfigManager) -> APIRouter:
             if not is_subpath(restore_tmp_root, staging_dir):
                 raise ValueError("invalid restore staging path")
 
-            _extract_archive_into_dir(upload_path, staging_dir)
+            extract_archive_into_dir(upload_path, staging_dir)
 
             restored_meta_path = WorkspaceMeta.path_for(staging_dir)
             if not restored_meta_path.exists() or not restored_meta_path.is_file():
@@ -1227,6 +1107,7 @@ def create_workspace_router(config_manager: ConfigManager) -> APIRouter:
 
     @scoped.post("/{workspace}/backup-jobs")
     def create_workspace_backup_job_scoped(workspace: str) -> dict:
+        _require_archive_tools_or_503()
         ws_id = workspace.strip()
         try:
             ws_id = require_workspace_id(ws_id)
@@ -1346,6 +1227,8 @@ def create_workspace_router(config_manager: ConfigManager) -> APIRouter:
 
     @scoped.post("/restore-jobs")
     async def create_workspace_restore_job_scoped(request: Request) -> dict:
+        # 受け取れない書庫を先に受け取らない。
+        _require_archive_tools_or_503()
         job_id = uuid.uuid4().hex
         upload_path = _workspace_restore_upload_path(job_id)
         total_bytes = 0
@@ -1373,7 +1256,7 @@ def create_workspace_router(config_manager: ConfigManager) -> APIRouter:
             raise HTTPException(status_code=400, detail="backup payload is empty")
 
         try:
-            archive_meta = _read_workspace_meta_from_archive(upload_path)
+            archive_meta = read_workspace_meta_from_archive(upload_path)
         except ValueError as exc:
             if upload_path.exists():
                 try:
@@ -1454,6 +1337,7 @@ def create_workspace_router(config_manager: ConfigManager) -> APIRouter:
 
     @scoped.get("/{workspace}/backup")
     def backup_workspace_scoped(workspace: str):
+        _require_archive_tools_or_503()
         ws_id = workspace.strip()
         try:
             ws_id = require_workspace_id(ws_id)
@@ -1491,7 +1375,7 @@ def create_workspace_router(config_manager: ConfigManager) -> APIRouter:
         archive_path = tmp_dir / download_name
 
         try:
-            _create_workspace_backup_archive(
+            create_workspace_backup_archive(
                 workspace_root=root, archive_path=archive_path, members=members
             )
         except ValueError as exc:
@@ -1507,6 +1391,7 @@ def create_workspace_router(config_manager: ConfigManager) -> APIRouter:
 
     @scoped.post("/restore")
     async def restore_workspace_scoped(request: Request) -> dict:
+        _require_archive_tools_or_503()
         tmp_dir = Path(
             tempfile.mkdtemp(
                 prefix="xima-ws-restore-upload-",
@@ -1528,7 +1413,7 @@ def create_workspace_router(config_manager: ConfigManager) -> APIRouter:
                 raise HTTPException(status_code=400, detail="backup payload is empty")
 
             try:
-                archive_meta = _read_workspace_meta_from_archive(archive_path)
+                archive_meta = read_workspace_meta_from_archive(archive_path)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
 
@@ -1554,7 +1439,7 @@ def create_workspace_router(config_manager: ConfigManager) -> APIRouter:
                 raise HTTPException(status_code=500, detail="invalid staging path")
 
             try:
-                _extract_archive_into_dir(archive_path, staging_dir)
+                extract_archive_into_dir(archive_path, staging_dir)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
 
