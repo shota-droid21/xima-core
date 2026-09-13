@@ -42,6 +42,66 @@ IS_MONOREPO=0
 PY="$CORE_ROOT/.venv/bin/python"
 [ -x "$PY" ] || PY="$(command -v python3)"
 
+# 0) 依存が古くないかを見る
+#
+#    **`git pull` だけして `setup.sh` を忘れると、core は起動しない。** 新しい依存が
+#    requirements に入った版へ上げた場合、import の時点で落ちる。そのとき出るのは
+#    uvicorn のトレースバックの中の ModuleNotFoundError で、「setup.sh を実行せよ」
+#    とは読めない。v0.4.2 で zstandard を足したときに、この形で踏める状態になった。
+#
+#    `setup.sh` は入れた requirements のハッシュを `.venv/.requirements.hash` に
+#    残している。ここではそれと突き合わせるだけで、**何もインストールしない**。
+#
+#    `--no-ml` で入れた場合は base だけのハッシュになるため、**両方の組み合わせを
+#    候補にして、どちらかに一致すれば黙る**。こうすると設置形態を覚えておく必要が無い。
+#
+#    **止めない。** requirements のコメントを直しただけでもハッシュは変わるので、
+#    そこで起動を拒むと、動く環境を塞ぐことになる。起動直前に出しておけば、
+#    後から落ちたときに理由がすぐ上に出ている。
+check_requirements_hash() {
+  local venv_hash_file="$CORE_ROOT/.venv/.requirements.hash"
+  [ -f "$venv_hash_file" ] || return 0
+  local req_dir="$CORE_ROOT/api"
+  local base="$req_dir/requirements.base.txt"
+  local jobs="$req_dir/requirements.jobs.txt"
+  [ -f "$base" ] || return 0
+
+  local stored current_base current_full
+  stored="$(cat "$venv_hash_file" 2>/dev/null || true)"
+  current_base="$("$PY" - "$base" <<'PYEOF' 2>/dev/null || true
+import hashlib, sys
+h = hashlib.sha256()
+for path in sys.argv[1:]:
+    with open(path, "rb") as fp:
+        h.update(fp.read())
+print(h.hexdigest())
+PYEOF
+)"
+  current_full="$current_base"
+  if [ -f "$jobs" ]; then
+    current_full="$("$PY" - "$base" "$jobs" <<'PYEOF' 2>/dev/null || true
+import hashlib, sys
+h = hashlib.sha256()
+for path in sys.argv[1:]:
+    with open(path, "rb") as fp:
+        h.update(fp.read())
+print(h.hexdigest())
+PYEOF
+)"
+  fi
+
+  [ -z "$stored" ] && return 0
+  [ "$stored" = "$current_base" ] && return 0
+  [ "$stored" = "$current_full" ] && return 0
+
+  echo
+  echo "warning: 依存（requirements）が、いま入っているものと違います。" >&2
+  echo "         新しい依存が足りないと core は起動しません。次を実行してください:" >&2
+  echo "           ./scripts/setup.sh" >&2
+  echo
+}
+check_requirements_hash
+
 export XIMA_WORKSPACES_ROOT="$WS_ROOT"
 
 # 1) app dist の解決
