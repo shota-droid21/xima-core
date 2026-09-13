@@ -108,9 +108,6 @@ head ごとの `val_acc` / `val_loss` の推移が入ります。推論スコア
 - Python 3.12 以上と virtualenv（`core/.venv`）
 - ジョブ（学習 / 推論 / 埋め込み）は **API プロセス内で実行される**ため、ブローカー（redis）も
   別プロセスのワーカーも必要ありません
-- `tar` と `zstd`（**workspace のバックアップ / 復元を使う場合のみ**）。無くてもラベリングと
-  学習は動きます。入っていない場合、バックアップは押した時点で理由が返ります
-  （macOS: `brew install zstd` / Debian・Ubuntu: `apt install zstd`）
 
 任意 — 分散実行（GPU ワーカー / 複数マシン）を行う場合のみ:
 

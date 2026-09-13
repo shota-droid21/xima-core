@@ -30,10 +30,8 @@ from .utils.short_id import (
 )
 from .workspace_archive import (
     ARCHIVE_EXT,
-    ArchiveToolsMissing,
     create_workspace_backup_archive,
     extract_archive_into_dir,
-    missing_archive_tools,
     read_workspace_meta_from_archive,
 )
 from .utils.sidebar_order import (
@@ -198,18 +196,6 @@ def _reserved_workspace_ids_in_trash(trash_root: Path) -> set[str]:
             reserved.add(ws_id)
 
     return reserved
-
-
-def _require_archive_tools_or_503() -> None:
-    """`tar` / `zstd` が無ければ、**ジョブを作る前に**止める（#385）。
-
-    `tar` はあるが `zstd` が無い環境では `FileNotFoundError` が起きない。
-    `tar` が子プロセスを見つけられず status 127 で落ちるため、走らせてからしか
-    失敗が分からなかった。ここで止めれば、押した時点で理由が返る。
-    """
-    missing = missing_archive_tools()
-    if missing:
-        raise HTTPException(status_code=503, detail=str(ArchiveToolsMissing(missing)))
 
 
 def create_workspace_router(config_manager: ConfigManager) -> APIRouter:
@@ -1107,7 +1093,6 @@ def create_workspace_router(config_manager: ConfigManager) -> APIRouter:
 
     @scoped.post("/{workspace}/backup-jobs")
     def create_workspace_backup_job_scoped(workspace: str) -> dict:
-        _require_archive_tools_or_503()
         ws_id = workspace.strip()
         try:
             ws_id = require_workspace_id(ws_id)
@@ -1227,8 +1212,6 @@ def create_workspace_router(config_manager: ConfigManager) -> APIRouter:
 
     @scoped.post("/restore-jobs")
     async def create_workspace_restore_job_scoped(request: Request) -> dict:
-        # 受け取れない書庫を先に受け取らない。
-        _require_archive_tools_or_503()
         job_id = uuid.uuid4().hex
         upload_path = _workspace_restore_upload_path(job_id)
         total_bytes = 0
@@ -1337,7 +1320,6 @@ def create_workspace_router(config_manager: ConfigManager) -> APIRouter:
 
     @scoped.get("/{workspace}/backup")
     def backup_workspace_scoped(workspace: str):
-        _require_archive_tools_or_503()
         ws_id = workspace.strip()
         try:
             ws_id = require_workspace_id(ws_id)
@@ -1391,7 +1373,6 @@ def create_workspace_router(config_manager: ConfigManager) -> APIRouter:
 
     @scoped.post("/restore")
     async def restore_workspace_scoped(request: Request) -> dict:
-        _require_archive_tools_or_503()
         tmp_dir = Path(
             tempfile.mkdtemp(
                 prefix="xima-ws-restore-upload-",
