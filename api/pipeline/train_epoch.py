@@ -12,7 +12,8 @@ Key differences vs 02_train:
   Then:
     DATASET_DIR = <...>/dataset
     MODELS_DIR  = <...>/models
-- Emits job progress updates (head/epoch/batch) for real-time UI.
+- Emits job progress updates for real-time UI. **head のループの中では、
+  帯が数えるのは常に「その head のエポック」**（`head_progress` / #405）。
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ from feature_cache import (
     feature_memory_bytes,
     usable_items,
 )
+from head_progress import head_progress
 from job_progress import update_job_progress
 from label_schema import (
     canonical_head_type,
@@ -721,12 +723,16 @@ def main() -> None:
         print(f"[INFO] START TRAIN HEAD: {head}")
         print("========================================")
 
-        update_job_progress(
+        # **head の番号を帯に入れない（#405）。** ここで `1/3` を出すと、直後に
+        # エポックの `1/500` へ切り替わって帯が大きく戻る。始まりは「0 エポック」。
+        head_progress(
             phase="start_head",
-            current=head_i,
-            total=n_heads_total,
-            message=f"starting head: {head}",
-            extra={"head": head, "head_index": head_i, "heads_total": n_heads_total},
+            head=head,
+            head_index=head_i,
+            heads_total=n_heads_total,
+            epoch=0,
+            epochs_total=int(args.epochs),
+            detail="starting",
         )
 
         head_schema = schema_head_map.get(head)
@@ -813,12 +819,14 @@ def main() -> None:
             clip_model.eval()
             head_model.train()
 
-            update_job_progress(
+            head_progress(
                 phase="train",
-                current=epoch + 1,
-                total=epochs_total,
-                message=f"training {head} (epoch {epoch+1}/{epochs_total})",
-                extra={"head": head, "epoch": epoch + 1, "epochs": epochs_total, "stage": "train"},
+                head=head,
+                head_index=head_i,
+                heads_total=n_heads_total,
+                epoch=epoch + 1,
+                epochs_total=epochs_total,
+                extra={"stage": "train"},
             )
 
             loss_sum = 0.0
@@ -857,19 +865,19 @@ def main() -> None:
                 ):
                     last_progress_ts = now
                     train_loss_avg = loss_sum / max(train_steps, 1)
-                    update_job_progress(
+                    # **帯はエポックのまま。バッチは文言と `extra` に出す（#405）。**
+                    # ここで `batch_i / total_batches` を帯に入れていたため、
+                    # エポックが変わるたびに帯が 1 に戻っていた。
+                    head_progress(
                         phase="train",
-                        current=batch_i,
-                        total=total_batches,
-                        message=(
-                            f"training {head} | epoch {epoch+1}/{epochs_total} "
-                            f"batch {batch_i}/{total_batches}"
-                        ),
+                        head=head,
+                        head_index=head_i,
+                        heads_total=n_heads_total,
+                        epoch=epoch + 1,
+                        epochs_total=epochs_total,
+                        detail=f"batch {batch_i}/{total_batches}",
                         extra={
-                            "head": head,
                             "head_type": head_type,
-                            "epoch": epoch + 1,
-                            "epochs": epochs_total,
                             "batch": batch_i,
                             "batches": total_batches,
                             "train_loss": float(loss.item()),
@@ -883,10 +891,17 @@ def main() -> None:
                 )
             train_loss = loss_sum / max(train_steps, 1)
 
-            update_job_progress(
+            # **ここでもエポックを渡す（#405）。** `update_job_progress` は
+            # 渡されなかった値を `None` で上書きするので、渡さないと帯が消える。
+            head_progress(
                 phase="val",
-                message=f"validating {head} (epoch {epoch+1}/{epochs_total})",
-                extra={"head": head, "epoch": epoch + 1, "epochs": epochs_total, "stage": "val"},
+                head=head,
+                head_index=head_i,
+                heads_total=n_heads_total,
+                epoch=epoch + 1,
+                epochs_total=epochs_total,
+                detail="validating",
+                extra={"stage": "val"},
             )
             val_loss, val_acc, val_exact = eval_one_epoch(
                 head=head_model,
@@ -916,13 +931,15 @@ def main() -> None:
             epoch_history.append(record)
 
             # basic progress update
-            update_job_progress(
+            head_progress(
                 phase="epoch_done",
-                current=epoch + 1,
-                total=epochs_total,
-                message=f"epoch done: {head}",
+                head=head,
+                head_index=head_i,
+                heads_total=n_heads_total,
+                epoch=epoch + 1,
+                epochs_total=epochs_total,
+                detail=f"val_loss={val_loss:.4f}",
                 extra={
-                    "head": head,
                     "head_type": head_type,
                     "val_acc": val_acc,
                     "val_loss": val_loss,
@@ -1076,12 +1093,17 @@ def main() -> None:
         run_meta["metrics"] = {"heads": heads_metrics}
         write_run_meta(run_dir, run_meta)
 
-        update_job_progress(
+        # **ここも head の番号ではなくエポック（#405）。** 早期打ち切りがあるので、
+        # 実際に回った数（`len(epoch_history)`）を出す。`epochs_total` は上限である。
+        head_progress(
             phase="saved",
-            current=head_i,
-            total=n_heads_total,
-            message=f"saved head: {head}",
-            extra={"head": head, "ckpt_path": str(ckpt_path)},
+            head=head,
+            head_index=head_i,
+            heads_total=n_heads_total,
+            epoch=len(epoch_history),
+            epochs_total=epochs_total,
+            detail="saved",
+            extra={"ckpt_path": str(ckpt_path)},
         )
 
     run_meta["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
