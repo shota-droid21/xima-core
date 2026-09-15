@@ -127,9 +127,9 @@ def test_head_counter_only_when_there_are_several() -> None:
     assert all("head_index" not in c["extra"] for c in calls)
 
     calls, report = _recorder()
-    _simulate_head(report, head="hair_color", head_index=2, heads_total=3,
+    _simulate_head(report, head="tone", head_index=2, heads_total=3,
                    epochs_total=1, batches=4)
-    assert all(c["message"].startswith("head 2/3 hair_color | epoch ") for c in calls)
+    assert all(c["message"].startswith("head 2/3 tone | epoch ") for c in calls)
     assert calls[0]["extra"]["heads_total"] == 3
 
 
