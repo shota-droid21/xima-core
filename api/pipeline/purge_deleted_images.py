@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-"""Delete source images flagged with delete=true in label_input/labels.json."""
+"""Delete source images flagged with delete=true in label_input/labels.json.
+
+**記録されたパスにある画像だけを消す（#410）。** 以前は、そのパスに画像が無いとき
+`file_id`（＝ファイル名の語幹）で別の場所を探し、見つかったものを代わりに消していた。
+フォルダは見ていないので、`a/photo.png` を対象にしたつもりで `b/photo.png` が
+消えることがあった。**原本の削除は取り返しがつかない。**
+
+「候補が 1 つのときだけ消す」では直らない。#380 が再現した場面は `a/photo.png` が既に
+無く `b/photo.png` だけがある状態で、**候補はちょうど 1 つ**だからである。
+同じ語幹であることは、同じ画像であることの根拠にならない。
+
+消せなかったものは件数と例を出す。画像が移動・改名されていた場合は、一覧を作り直せば
+新しいパスで記録されるので、そのうえでもう一度指定できる。
+"""
 
 from __future__ import annotations
 
@@ -97,51 +110,6 @@ def _resolve_source_path(root: Path, value: str) -> Path | None:
     return resolved if _is_subpath(root, resolved) else None
 
 
-def _build_file_id_index(root: Path) -> dict[str, list[Path]]:
-    index: dict[str, list[Path]] = {}
-    for p in root.rglob("*"):
-        if not p.is_file():
-            continue
-        stem = p.stem
-        if not stem:
-            continue
-        index.setdefault(stem, []).append(p.resolve())
-    return index
-
-
-def _resolve_by_file_id(
-    *,
-    root: Path,
-    item: Dict[str, Any],
-    fallback_raw_path: str | None,
-    file_id_index: dict[str, list[Path]],
-) -> Path | None:
-    raw_file_id = item.get("file_id")
-    file_id = str(raw_file_id or "").strip()
-    if not file_id and fallback_raw_path:
-        file_id = Path(unquote(fallback_raw_path)).stem
-    if not file_id:
-        return None
-
-    candidates = file_id_index.get(file_id) or []
-    if not candidates:
-        return None
-
-    # Prefer matching suffix when raw path is available.
-    preferred_suffix = ""
-    if fallback_raw_path:
-        preferred_suffix = Path(unquote(fallback_raw_path)).suffix.lower()
-    if preferred_suffix:
-        for c in candidates:
-            if c.suffix.lower() == preferred_suffix and _is_subpath(root, c):
-                return c
-
-    for c in candidates:
-        if _is_subpath(root, c):
-            return c
-    return None
-
-
 def _iter_items(labels_path: Path) -> Iterable[Dict[str, Any]]:
     payload = json.loads(labels_path.read_text(encoding="utf-8"))
     items = payload.get("items")
@@ -191,9 +159,8 @@ def main() -> None:
     targets_by_path: dict[str, Path] = {}
     missing_path_count = 0
     outside_root_count = 0
-    fallback_hit_count = 0
-    fallback_miss_count = 0
-    file_id_index: dict[str, list[Path]] | None = None
+    not_found_count = 0
+    not_found_samples: list[str] = []
 
     for item in _iter_items(labels_path):
         total_items += 1
@@ -211,20 +178,13 @@ def main() -> None:
             outside_root_count += 1
             continue
 
+        # **記録されたパスに無ければ、探さずに飛ばす（#410）。**
+        # 別の場所に同じ語幹のファイルがあっても、それが同じ画像である根拠は無い。
         if not resolved.exists():
-            if file_id_index is None:
-                file_id_index = _build_file_id_index(root_dir)
-            fallback_resolved = _resolve_by_file_id(
-                root=root_dir,
-                item=item,
-                fallback_raw_path=raw_path,
-                file_id_index=file_id_index,
-            )
-            if fallback_resolved is not None:
-                resolved = fallback_resolved
-                fallback_hit_count += 1
-            else:
-                fallback_miss_count += 1
+            not_found_count += 1
+            if len(not_found_samples) < 10:
+                not_found_samples.append(raw_path)
+            continue
 
         targets_by_path[str(resolved)] = resolved
 
@@ -253,8 +213,7 @@ def main() -> None:
             "target_candidates": len(targets),
             "missing_path": missing_path_count,
             "outside_root": outside_root_count,
-            "fallback_hit": fallback_hit_count,
-            "fallback_miss": fallback_miss_count,
+            "not_found": not_found_count,
             "dry_run": dry_run,
         },
     )
@@ -312,8 +271,7 @@ def main() -> None:
         "target_candidates": len(targets),
         "missing_path": missing_path_count,
         "outside_root": outside_root_count,
-        "fallback_hit": fallback_hit_count,
-        "fallback_miss": fallback_miss_count,
+        "not_found": not_found_count,
         "deleted_files": deleted_count,
         "missing_files": missing_file_count,
         "errors": error_count,
@@ -326,6 +284,14 @@ def main() -> None:
     if missing_samples:
         for sample in missing_samples:
             print(f"[INFO] missing target: {sample}")
+    if not_found_count:
+        # **消していないことを必ず出す。** 黙って飛ばすと「消えたはず」が残る。
+        print(
+            f"[WARN] 記録されたパスに画像が無いため、{not_found_count} 件を消していません。"
+            "移動・改名した場合は一覧を作り直してから指定してください。"
+        )
+        for sample in not_found_samples:
+            print(f"[WARN] not found: {sample}")
 
     update_job_progress(
         phase="done",
