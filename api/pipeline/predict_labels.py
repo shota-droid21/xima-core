@@ -58,20 +58,17 @@ from label_predictions import (  # noqa: E402
     record_prediction,
     write_json_atomic,
 )
+from prediction_writeback import (  # noqa: E402
+    PendingPrediction,
+    apply_pending,
+    read_json_with_digest,
+)
 from prediction_reliability import (  # noqa: E402
     agreement_points,
     build_reliability,
     collect_samples,
     val_source_paths,
 )
-
-
-def _load_json(path: Path) -> Dict[str, Any]:
-    with path.open(encoding="utf-8") as f:
-        data = json.load(f)
-    if not isinstance(data, dict):
-        raise SystemExit(f"[ERROR] 不正な JSON です: {path}")
-    return data
 
 
 def _resolve_heads(
@@ -165,7 +162,9 @@ def main() -> None:
 
     update_job_progress(phase="load", message="loading labels and checkpoints")
 
-    data = _load_json(labels_path)
+    # **読んだ時点の指紋を控える（#411）。**推論には数分かかることがあり、
+    # そのあいだに画面から保存されうる。書き戻す直前に照合する。
+    data, digest_at_load = read_json_with_digest(labels_path)
     items = data.get("items")
     if not isinstance(items, list) or not items:
         raise SystemExit(f"[ERROR] labels.json に items がありません: {labels_path}")
@@ -186,6 +185,7 @@ def main() -> None:
 
     per_head: Dict[str, Dict[str, int]] = {}
     reliability_heads: Dict[str, Dict[str, Any]] = {}
+    pending: List[PendingPrediction] = []
     total_recorded = 0
 
     for hi, (head, head_type, ckpt) in enumerate(heads):
@@ -271,13 +271,17 @@ def main() -> None:
         }
 
         if not args.dry_run:
+            # **ここでは書かない（#411）。**手元の items は読んだ時点のもので、
+            # そのまま書き戻すと、あいだに保存された編集を消す。
             for item, prediction in planned:
-                record_prediction(
-                    item,
-                    head=head,
-                    head_type=head_type,
-                    prediction=prediction,
-                    run_name=run_dir.name,
+                pending.append(
+                    PendingPrediction(
+                        file_id=str(item.get("file_id") or ""),
+                        head=head,
+                        head_type=head_type,
+                        prediction=prediction,
+                        run_name=run_dir.name,
+                    )
                 )
         head_report.recorded = len(planned)
         total_recorded += len(planned)
@@ -309,10 +313,44 @@ def main() -> None:
     elif total_recorded == 0:
         print("[INFO] 候補を付けられる item がありませんでした。labels.json は変更していません")
     else:
+        # **書く直前に読み直す（#411）。**推論のあいだに保存された編集を消さない。
+        # 手元の items ではなく、いま disk にあるものの上へ候補を載せる。
+        try:
+            fresh, digest_now = read_json_with_digest(labels_path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise SystemExit(
+                f"[ERROR] labels.json を読み直せませんでした: {labels_path}\n"
+                f"        候補は書いていません。原因を直してから実行し直してください。"
+                f"（{exc}）"
+            )
+
+        changed = digest_now != digest_at_load
+        fresh_items = fresh.get("items")
+        if not isinstance(fresh_items, list):
+            raise SystemExit(
+                f"[ERROR] 読み直した labels.json に items がありません: {labels_path}"
+            )
+
+        writeback = apply_pending(fresh_items, pending, record=record_prediction)
+        total_recorded = writeback.applied
+
+        if changed:
+            print(
+                "[INFO] 推論のあいだに labels.json が保存されていました。"
+                "保存された内容を残し、その上に候補を載せます。"
+            )
+        if writeback.skipped_missing:
+            print(
+                f"[WARN] 推論のあいだに {writeback.skipped_missing} 件の item が"
+                "無くなったため、その候補は書いていません。"
+            )
+            for fid in writeback.missing_file_ids:
+                print(f"[WARN]   無くなった item: {fid}")
+
         if reliability_heads:
             # item ごとの値ではなく run 全体の性質なので meta に置く。
             # app は labels.json を読むだけで一括確定の判断材料を得られる。
-            meta = data.get("meta")
+            meta = fresh.get("meta")
             if not isinstance(meta, dict):
                 meta = {}
             meta["prediction_reliability"] = build_reliability(
@@ -321,11 +359,11 @@ def main() -> None:
                 basis="val" if val_paths else "labeled",
                 now=time.strftime("%Y-%m-%dT%H:%M:%S"),
             )
-            data["meta"] = meta
+            fresh["meta"] = meta
         # **スナップショットは取らない。**labels（確定値）を変えていないため、
         # 履歴を残す意味が薄く、実行のたびに「変化のない版」で復元候補が埋まる。
         # 書き込み自体は tmp + fsync + replace で壊さない。
-        write_json_atomic(labels_path, data)
+        write_json_atomic(labels_path, fresh)
         print(f"[INFO] 候補を記録しました: {labels_path}（{total_recorded} 件）")
         print("[INFO] labels（確定値）は変更していません。確定はラベリング画面で行います")
 
