@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from file_id import file_id_for_path
+
 # index.json のスキーマ版。読み手が互換を判断できるようにする。
 EMBEDDING_CACHE_VERSION = "1"
 
@@ -131,29 +133,37 @@ def plan_embeddings(
     targets: `{"file_id", "path", "content_hash"}` の列（今回の対象画像）
     existing_index: `load_index()` の戻り（None ならキャッシュ無し）
 
-    - file_id が既存にあり content_hash も一致 → reuse（既存 row を流用）
+    - 同じ画像が既存にあり content_hash も一致 → reuse（既存 row を流用）
     - 一致しない / 存在しない → to_embed
-    - 既存にあって targets に無い file_id → dropped（index から落とす）
+    - 既存にあって targets に無い → dropped（index から落とす）
+
+    **突き合わせの鍵は、両側とも `path` から作り直す（#409）。**記録されている
+    `file_id` は見ない。旧版の鍵はファイル名の語幹だけで作られていたため、
+    読み替えないと全画像が「初めて見る」扱いになり、**キャッシュが在るのに
+    埋め込み直す。**`path` は旧版の index も持っている。
+
+    `path` の無いものは突き合わせない。埋め込みは再生成できる派生物なので
+    （Decision 004）、鍵が決まらないときは計算し直す方へ倒す。
     """
     existing_items: Dict[str, Dict[str, Any]] = {}
     if existing_index:
         for item in existing_index.get("items", []) or []:
             if not isinstance(item, dict):
                 continue
-            fid = item.get("file_id")
-            if isinstance(fid, str):
-                existing_items[fid] = item
+            key = file_id_for_path(item.get("path"))
+            if key:
+                existing_items[key] = item
 
     plan = EmbedPlan()
     seen: set[str] = set()
 
     for target in targets:
-        fid = target.get("file_id")
-        if not isinstance(fid, str):
+        key = file_id_for_path(target.get("path"))
+        if not key:
             continue
-        seen.add(fid)
+        seen.add(key)
 
-        prev = existing_items.get(fid)
+        prev = existing_items.get(key)
         prev_row = prev.get("row") if prev else None
         if (
             prev is not None
@@ -166,7 +176,7 @@ def plan_embeddings(
         else:
             plan.to_embed.append(dict(target))
 
-    plan.dropped = [fid for fid in existing_items if fid not in seen]
+    plan.dropped = [key for key in existing_items if key not in seen]
     return plan
 
 

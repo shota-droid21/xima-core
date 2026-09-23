@@ -133,7 +133,8 @@ def test_plan_reports_dropped_files() -> None:
     )
     plan = plan_embeddings([_target("a", "h1")], existing)
 
-    assert plan.dropped == ["gone"]
+    # 落ちたものは path から作った鍵で返る（#409）
+    assert plan.dropped == ["gone.png"]
     assert [t["file_id"] for t in plan.reuse] == ["a"]
 
 
@@ -141,12 +142,60 @@ def test_plan_ignores_entries_without_usable_row() -> None:
     # row が壊れている既存エントリは信用せず再計算する
     existing = {
         "version": EMBEDDING_CACHE_VERSION,
-        "items": [{"file_id": "a", "content_hash": "h1", "row": None}],
+        "items": [
+            {"file_id": "a", "path": "a.png", "content_hash": "h1", "row": None}
+        ],
     }
     plan = plan_embeddings([_target("a", "h1")], existing)
 
     assert [t["file_id"] for t in plan.to_embed] == ["a"]
     assert plan.reuse == []
+
+
+def test_plan_reuses_cache_written_with_the_old_file_id() -> None:
+    """旧版の鍵で書かれた index でも埋め込み直さない（#409）。
+
+    旧版の `file_id` はファイル名の語幹だけだった。読み替えないと全画像が
+    「初めて見る」扱いになり、**キャッシュが在るのに全部計算し直す。**
+    """
+    existing = build_index_payload(
+        model_name="ViT-B/32",
+        dim=4,
+        entries=[
+            # 旧版が書いた形。鍵は語幹、path は階層を持つ。
+            {"file_id": "circle_001", "path": "circle/circle_001.png",
+             "content_hash": "h1", "row": 0},
+        ],
+    )
+    targets = [_target("circle/circle_001.png", "h1", path="circle/circle_001.png")]
+
+    plan = plan_embeddings(targets, existing)
+
+    assert plan.to_embed == [], "キャッシュが在るのに埋め込み直している"
+    assert [t["file_id"] for t in plan.reuse] == ["circle/circle_001.png"]
+    assert plan.reuse[0]["source_row"] == 0
+    assert plan.dropped == []
+
+
+def test_plan_separates_same_named_images_in_different_folders() -> None:
+    """同名の別画像が 1 行に畳まれない（#409）。"""
+    existing = build_index_payload(
+        model_name="ViT-B/32",
+        dim=4,
+        entries=[
+            {"file_id": "a/photo.png", "path": "a/photo.png",
+             "content_hash": "h1", "row": 0},
+        ],
+    )
+    targets = [
+        _target("a/photo.png", "h1", path="a/photo.png"),
+        _target("b/photo.png", "h2", path="b/photo.png"),
+    ]
+
+    plan = plan_embeddings(targets, existing)
+
+    assert [t["file_id"] for t in plan.reuse] == ["a/photo.png"]
+    assert [t["file_id"] for t in plan.to_embed] == ["b/photo.png"]
 
 
 def test_build_output_plan_assigns_sequential_rows_and_sources() -> None:

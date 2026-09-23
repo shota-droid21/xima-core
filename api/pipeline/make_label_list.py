@@ -20,7 +20,9 @@ from typing import Dict, List, Tuple
 
 from PIL import Image, ImageOps
 
+from file_id import file_id_for_path
 from job_progress import update_job_progress
+from label_list_merge import merge_items
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 DEFAULT_THUMB_WIDTH = 256
@@ -167,7 +169,7 @@ def collect_images(input_dir: Path, rel_base_dir: Path) -> List[Dict]:
             continue
 
         rel_path = os.path.relpath(p, rel_base_dir)
-        file_id = Path(rel_path).stem
+        file_id = file_id_for_path(rel_path)
 
         created_at = None
         try:
@@ -239,15 +241,15 @@ def load_existing(out_path: Path) -> Tuple[Dict, Dict[str, Dict]]:
 
     existing_by_file_id: Dict[str, Dict] = {}
     for item in existing_items:
-        fid = item.get("file_id")
+        # **記録されている `file_id` は使わず、`path` から引き直す（#409）。**
+        # 旧版の `file_id` は語幹だけで作られており、同名の別画像が同じ鍵に
+        # なっていた。`path` は旧版も持っているので、ここで読み替えれば
+        # 移行を走らせずに既存のラベルを新しい鍵の上へ引き継げる。
+        fid = file_id_for_path(item.get("path"))
         if not fid:
-            path = item.get("path")
-            if path:
-                fid = Path(path).stem
-                item["file_id"] = fid
-        if not fid:
+            # path が無い item。旧版から引き継ぐ鍵が無いので、衝突しない値を作る。
             fid = f"_legacy_{item.get('id')}"
-            item["file_id"] = fid
+        item["file_id"] = fid
         existing_by_file_id[fid] = item
 
     return existing_meta, existing_by_file_id
@@ -298,7 +300,7 @@ def generate_all_thumbs(
         if not rel_path:
             missing += 1
             continue
-        fid = item.get("file_id") or Path(rel_path).stem
+        fid = item.get("file_id") or file_id_for_path(rel_path)
         src = (html_dir / rel_path).resolve()
         if not src.exists() or not src.is_file():
             missing += 1
@@ -358,7 +360,7 @@ def embed_thumb_paths(
         rel_path = item.get("path")
         if not rel_path:
             continue
-        fid = item.get("file_id") or Path(rel_path).stem
+        fid = item.get("file_id") or file_id_for_path(rel_path)
         if not fid:
             continue
 
@@ -483,36 +485,15 @@ def main() -> None:
     )
 
     existing_meta, existing_by_file_id = load_existing(out_path)
-    new_by_file_id = {item["file_id"]: item for item in new_items}
-
-    merged_by_file_id: Dict[str, Dict] = {}
-    for fid, new_item in new_by_file_id.items():
-        existing = existing_by_file_id.get(fid)
-        if existing:
-            merged = dict(existing)
-            merged["path"] = new_item["path"]
-            if not merged.get("created_at") and new_item.get("created_at"):
-                merged["created_at"] = new_item.get("created_at")
-        else:
-            merged = new_item
-        merged_by_file_id[fid] = merged
-
-    merged_items: List[Dict] = []
-    for idx, item in enumerate(
-        sorted(merged_by_file_id.values(), key=lambda x: x.get("path", ""))
-    ):
-        item["id"] = idx
-        if "label" in item:
-            item.pop("label", None)
-        if "split" in item:
-            item.pop("split", None)
-
-        if remove_labels and "labels" in item and isinstance(item["labels"], dict):
-            for lk in list(remove_labels):
-                if lk in item["labels"]:
-                    item["labels"].pop(lk, None)
-
-        merged_items.append(item)
+    merged_items, collapsed = merge_items(
+        new_items, existing_by_file_id, remove_labels=remove_labels
+    )
+    if collapsed:
+        # 鍵が一意でない。起きてはならないので、黙って進めない。
+        print(
+            f"[WARN] file_id が重なった画像が {collapsed} 件あり、"
+            "同じ件数の item が失われています。"
+        )
 
     meta = existing_meta or {}
     meta.update(

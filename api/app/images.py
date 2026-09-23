@@ -255,8 +255,10 @@ def create_images_router(config_manager: ConfigManager) -> APIRouter:
                 cache_key=file_id or item_id,
             )
 
+    # `file_id` は相対パスなので `/` を含む（#409）。`:path` を付けないと
+    # 階層のある画像が 404 になる。
     @router.get(
-        "/workspaces/{workspace}/experiments/{experiment}/images/by-file/{file_id}"
+        "/workspaces/{workspace}/experiments/{experiment}/images/by-file/{file_id:path}"
     )
     async def get_image_by_file_scoped(
         workspace: str, experiment: str, file_id: str, w: int | None = None

@@ -322,6 +322,9 @@ curl -s "http://127.0.0.1:27801/workspaces/ws_test/experiments/exp1/clusters?sco
 - GET `/workspaces/{ws}/experiments/{exp}/images/by-file/{file_id}`
   - 説明: 旧仕様互換のため、アイテム内の `file_id` フィールドをキーにファイルを返します。
   - クエリ: `?w=256` で上記と同様に WebP サムネイルを返します（事前生成が必須）。
+  - **`file_id` は `source_dir` からの相対パスです（v0.4.4 / #409）。**`a/photo.png` のように
+    `/` を含むため、パス部分をそのまま続けて指定します。以前はファイル名の語幹でしたが、
+    同名の別画像が同じ値になっていました。
 
 共通挙動:
 
@@ -336,8 +339,8 @@ curl -s "http://127.0.0.1:27801/workspaces/ws_test/experiments/exp1/clusters?sco
 # by-item (labels.json の "id" を使用)
 curl -O http://127.0.0.1:27801/workspaces/ws_test/experiments/exp1/images/by-item/<ID>
 
-# by-file (labels.json の "file_id" を使用 - 旧仕様互換)
-curl -O http://127.0.0.1:27801/workspaces/ws_test/experiments/exp1/images/by-file/<FILE_ID>
+# by-file (labels.json の "file_id" = source_dir からの相対パス - 旧仕様互換)
+curl -O http://127.0.0.1:27801/workspaces/ws_test/experiments/exp1/images/by-file/circle/circle_001.png
 ```
 
 ## ジョブ（Jobs）

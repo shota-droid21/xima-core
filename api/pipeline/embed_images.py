@@ -30,6 +30,7 @@ import torch
 import clip
 
 from device import _normalize_device_name, get_device
+from file_id import file_id_for_path
 from embedding_cache import (
     MATRIX_FILENAME,
     build_index_entries,
@@ -84,7 +85,7 @@ def build_targets(items: List[Dict[str, Any]], root: Path) -> List[Dict[str, Any
         if not rel_path:
             missing += 1
             continue
-        file_id = item.get("file_id") or Path(str(rel_path)).stem
+        file_id = item.get("file_id") or file_id_for_path(rel_path)
         src = (root / str(rel_path)).resolve()
         if not src.exists() or not src.is_file():
             missing += 1
