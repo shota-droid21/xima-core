@@ -17,8 +17,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Set
 
-from dataset_split import DEFAULT_VAL_RATIO, resolve_split
+from dataset_split import (
+    DEFAULT_VAL_RATIO,
+    SPLIT_TRAIN,
+    SPLIT_VAL,
+    resolve_split,
+)
 from label_schema import get_head_classes, get_heads, load_schema, normalize_label_for_head
+from label_provenance import has_unreviewed_bulk_value
 from unusable_labels import summarize, unusable_values
 
 from job_progress import update_job_progress
@@ -165,6 +171,9 @@ def main() -> None:
     #: dataset へ入らなかった理由の内訳（`deleted` / `excluded` / `unlabeled` /
     #: `invalid_split`）。`skipped` の総数だけでは何が起きたか読めない。
     skipped_reasons: Dict[str, int] = {}
+    #: 一括確定のまま人が見ていない値を持つため、val から train へ移した件数（#412）。
+    n_moved_out_of_val = 0
+    n_moved_out_of_pinned_val = 0
 
     for it in items:
         n_seen = n_processed + n_skipped + n_missing_src
@@ -229,6 +238,23 @@ def main() -> None:
             n_skipped += 1
             skipped_reasons[split_source] = skipped_reasons.get(split_source, 0) + 1
             continue
+
+        # **人が見ていない値を val に置かない（#412）。**
+        # 一括確定はモデル自身の予測を `labels` に書く。それを val の正解に
+        # 使うと、モデルを自分の答えで採点することになり、`val_acc` が本当より
+        # 高く出る。train には残す（疑似ラベルとしては使える）。
+        if split == SPLIT_VAL and has_unreviewed_bulk_value(it, skip=("split",)):
+            if split_source == "pinned":
+                # 人が val を指定していても移す。指定されたのは**どちらの組か**で
+                # あって、「この値を正解にしてよい」ではない。黙って動かさない。
+                n_moved_out_of_pinned_val += 1
+                print(
+                    f"[WARN] val に指定されていますが、一括確定のまま人が見ていない"
+                    f"値があるため train へ移します: {source_path}"
+                )
+            split = SPLIT_TRAIN
+            split_source = "moved_unreviewed"
+            n_moved_out_of_val += 1
         # 自動で決めた分は labels.json へ書き戻さない。**書くと「人が決めた」と
         # 区別できなくなる。** index.json にだけ残す。
         out_labels.pop("split", None)
@@ -309,6 +335,9 @@ def main() -> None:
             "created_at": datetime.now().isoformat(),
             # 自動割りを再現できるようにする（#325）。item ごとの `split_source` と対。
             "val_ratio": val_ratio,
+            # **val に入れなかった件数（#412）。**val_acc を見た人が、
+            # 標本がどれだけ痩せたかを数字なしに知ることはできない。
+            "moved_out_of_val_unreviewed": n_moved_out_of_val,
             "version": 2,
         },
         "items": index_items,
@@ -333,6 +362,18 @@ def main() -> None:
         print(f"   - {reason}: {count}")
     n_auto = sum(1 for it in index_items if it.get("split_source") == "auto")
     print(f" auto split:  {n_auto} (val_ratio={val_ratio})")
+    n_val = sum(1 for it in index_items if it.get("split") == SPLIT_VAL)
+    if n_moved_out_of_val:
+        print(
+            f"[INFO] 一括確定のまま人が見ていない値を持つ {n_moved_out_of_val} 件を"
+            f" val から train へ移しました（うち val 指定 {n_moved_out_of_pinned_val} 件）。"
+            f"val は {n_val} 件です。"
+        )
+    if not n_val:
+        print(
+            "[WARN] val が 0 件です。val_acc は測れません。"
+            "自分で確かめたラベルを増やしてから学習し直してください。"
+        )
     print(f" missing src: {n_missing_src}")
     print(f" removed:     {n_removed}")
     for hid, found in unusable.items():
@@ -353,6 +394,8 @@ def main() -> None:
             "removed": n_removed,
             "skipped_reasons": skipped_reasons,
             "val_ratio": val_ratio,
+            "moved_out_of_val_unreviewed": n_moved_out_of_val,
+            "val_items": n_val,
             "index_path": str(index_path),
             # 0 件なら {}。**黙って落とさない**ためだけの数で、処理は変えていない。
             "schema_violations": unusable,

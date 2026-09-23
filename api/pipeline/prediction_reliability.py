@@ -26,6 +26,7 @@ torch / numpy に依存しない（`label_predictions.py` と同じ方針）。
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
@@ -103,6 +104,19 @@ def agreement_points(
     return points
 
 
+@dataclass
+class SampleReport:
+    """一致率を何で測ったか。**数字だけを残さない**ための記録（#412）。"""
+
+    #: 正解として使った件数。
+    used: int = 0
+    #: 一括確定が書いたまま人が見ていないため、正解側から外した件数。
+    excluded_unreviewed: int = 0
+
+    def as_dict(self) -> Dict[str, int]:
+        return {"used": self.used, "excluded_unreviewed": self.excluded_unreviewed}
+
+
 def collect_samples(
     items: Sequence[Mapping[str, Any]],
     *,
@@ -111,12 +125,18 @@ def collect_samples(
     confidence_by_file_id: Mapping[str, float],
     predicted_by_file_id: Mapping[str, Any],
     limit_to_paths: Optional[Set[str]] = None,
+    report: Optional[SampleReport] = None,
 ) -> List[Tuple[float, bool]]:
     """人のラベルと予測の両方を持つ item から (confidence, 一致したか) を集める。
 
     `limit_to_paths` を渡すとその集合（＝val）だけに絞る。
+
+    **一括確定が書いたまま人が見ていない値は、正解として使わない（#412）。**
+    使うと、同じモデルの予測をそのモデルが書いた値と突き合わせることになり、
+    一致率が本当より高く出る。外した件数は `report` に残す。
     """
     from label_predictions import has_label, is_delete_flagged
+    from label_provenance import is_unreviewed_bulk_value
 
     samples: List[Tuple[float, bool]] = []
     for item in items:
@@ -129,6 +149,10 @@ def collect_samples(
         file_id = str(item.get("file_id") or "")
         if file_id not in confidence_by_file_id:
             continue
+        if is_unreviewed_bulk_value(item, head):
+            if report is not None:
+                report.excluded_unreviewed += 1
+            continue
         gold = (item.get("labels") or {}).get(head)
         samples.append(
             (
@@ -136,6 +160,8 @@ def collect_samples(
                 is_agreement(predicted_by_file_id[file_id], gold, head_type=head_type),
             )
         )
+    if report is not None:
+        report.used = len(samples)
     return samples
 
 

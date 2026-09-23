@@ -64,6 +64,7 @@ from prediction_writeback import (  # noqa: E402
     read_json_with_digest,
 )
 from prediction_reliability import (  # noqa: E402
+    SampleReport,
     agreement_points,
     build_reliability,
     collect_samples,
@@ -256,6 +257,7 @@ def main() -> None:
             fid = str(item.get("file_id") or "")
             confidence_by_file_id[fid] = float(prediction.confidence)
             predicted_by_file_id[fid] = prediction.value
+        sample_report = SampleReport()
         samples = collect_samples(
             items,
             head=head,
@@ -263,10 +265,14 @@ def main() -> None:
             confidence_by_file_id=confidence_by_file_id,
             predicted_by_file_id=predicted_by_file_id,
             limit_to_paths=val_paths or None,
+            report=sample_report,
         )
         reliability_heads[head] = {
             "head_type": head_type,
             "n": len(samples),
+            # **何を正解側に入れたかを残す（#412）。**数字だけでは、標本が
+            # 足りないのか一致していないのかを読む側が区別できない。
+            "excluded_unreviewed": sample_report.excluded_unreviewed,
             "points": agreement_points(samples),
         }
 
@@ -292,6 +298,11 @@ def main() -> None:
             f"削除対象 {head_report.skipped_deleted} / "
             f"埋め込み無し {head_report.skipped_no_embedding}"
         )
+        if sample_report.excluded_unreviewed:
+            print(
+                f"[INFO] {head}: 一括確定のまま人が見ていない値 "
+                f"{sample_report.excluded_unreviewed} 件を、一致率の正解側から外しました"
+            )
         if samples:
             basis_label = "val" if val_paths else "ラベル済み全件（train を含むため高めに出ます）"
             print(f"[INFO] {head}: 閾値ごとの実測一致率（{basis_label} {len(samples)} 件）")
@@ -302,6 +313,12 @@ def main() -> None:
                     f"         >= {pt['threshold']:.2f}  {pt['n']:4d} 件  "
                     f"一致率 {pt['agreement']:.3f}"
                 )
+        elif sample_report.excluded_unreviewed:
+            print(
+                f"[WARN] {head}: 一致率を測れる item がありません。"
+                "確定値がすべて一括確定のままで、人が見た値が 1 件もありません。"
+                "一括確定は使えません。いくつか自分で確かめてから測り直してください。"
+            )
         else:
             print(f"[INFO] {head}: 一致率を測れる item がありません（一括確定は使えません）")
         update_job_progress(

@@ -12,6 +12,7 @@ if str(_HERE) not in sys.path:
 
 from label_predictions import multi_label_confidence, prediction_from_scores
 from prediction_reliability import (
+    SampleReport,
     agreement_points,
     build_reliability,
     collect_samples,
@@ -82,6 +83,84 @@ def test_collect_samples_limits_to_val_and_skips_unlabeled():
         limit_to_paths={"a.jpg", "c.jpg", "d.jpg"},
     )
     assert samples == [(0.9, True)]
+
+
+def _bulk_confirmed(file_id: str, path: str, value: str):
+    """一括確定が書いたまま、人が見ていない item（#412）。"""
+    return {
+        "file_id": file_id,
+        "path": path,
+        "labels": {"h": value},
+        "predicted": {
+            "h": {
+                "value": value,
+                "confirmed": {"at": "2026-09-23T00:00:00", "threshold": 0.8},
+            }
+        },
+    }
+
+
+def test_collect_samples_excludes_unreviewed_bulk_values():
+    """**自分の予測を自分で採点しない（#412）。**
+
+    直す前は、一括確定が書いた値がそのまま `gold` になっていた。予測と必ず
+    一致するので、一致率は 1.0 に張り付く。
+    """
+    items = [
+        {"file_id": "f1", "path": "a.jpg", "labels": {"h": "cat"}},  # 人が付けた
+        _bulk_confirmed("f2", "b.jpg", "dog"),                       # 未確認
+        _bulk_confirmed("f3", "c.jpg", "dog"),                       # 未確認
+    ]
+    report = SampleReport()
+    samples = collect_samples(
+        items,
+        head="h",
+        head_type="multi_class",
+        confidence_by_file_id={"f1": 0.9, "f2": 0.95, "f3": 0.95},
+        predicted_by_file_id={"f1": "dog", "f2": "dog", "f3": "dog"},
+        report=report,
+    )
+
+    assert samples == [(0.9, False)], "未確認の値が正解側に入っている"
+    assert report.used == 1
+    assert report.excluded_unreviewed == 2
+
+
+def test_collect_samples_keeps_values_the_person_changed():
+    """一括確定の後に人が直したなら、それは人のラベルである。"""
+    item = _bulk_confirmed("f1", "a.jpg", "dog")
+    item["labels"]["h"] = "cat"  # 人が直した
+
+    report = SampleReport()
+    samples = collect_samples(
+        [item],
+        head="h",
+        head_type="multi_class",
+        confidence_by_file_id={"f1": 0.9},
+        predicted_by_file_id={"f1": "dog"},
+        report=report,
+    )
+
+    assert samples == [(0.9, False)]
+    assert report.excluded_unreviewed == 0
+
+
+def test_collect_samples_returns_nothing_rather_than_a_high_number():
+    """確定値が全部未確認なら、標本は 0 件。**高い一致率を出さない。**"""
+    items = [_bulk_confirmed(f"f{i}", f"{i}.jpg", "dog") for i in range(20)]
+    report = SampleReport()
+    samples = collect_samples(
+        items,
+        head="h",
+        head_type="multi_class",
+        confidence_by_file_id={f"f{i}": 0.99 for i in range(20)},
+        predicted_by_file_id={f"f{i}": "dog" for i in range(20)},
+        report=report,
+    )
+
+    assert samples == []
+    assert report.excluded_unreviewed == 20
+    assert all(pt["agreement"] is None for pt in agreement_points(samples))
 
 
 def test_val_source_paths(tmp_path: Path):
