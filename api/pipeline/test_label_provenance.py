@@ -26,10 +26,21 @@ def _bulk(value: Any, current: Any = None, *, head: str = "shape") -> Dict[str, 
             head: {
                 "value": value,
                 "confidence": 0.9,
-                "confirmed": {"at": "2026-09-23T00:00:00", "threshold": 0.8},
+                "confirmed": {
+                    "at": "2026-09-23T00:00:00",
+                    "threshold": 0.8,
+                    "value": value,
+                },
             }
         },
     }
+
+
+def _legacy_bulk(value: Any, current: Any = None) -> Dict[str, Any]:
+    """#418 より前に書かれた記録。`confirmed` が値を持たない。"""
+    item = _bulk(value, current)
+    item["predicted"]["shape"]["confirmed"].pop("value")
+    return item
 
 
 def test_value_written_by_bulk_confirm_is_unreviewed() -> None:
@@ -71,6 +82,97 @@ def test_any_head_is_enough_for_the_item() -> None:
     item = _bulk("circle", head="color")
     item["labels"]["shape"] = "square"  # 人が付けた head もある
     assert has_unreviewed_bulk_value(item)
+
+
+def test_the_record_survives_a_new_prediction() -> None:
+    """候補を付け直しても「人が見ていない」は消えない（#418）。
+
+    引き継がないと「一括確定 -> 学習 -> もう一度候補を付ける」を 1 周しただけで、
+    未確認の値が評価の正解側へ戻る。
+    """
+    from label_predictions import Prediction, record_prediction
+
+    item = _bulk("circle")
+    assert is_unreviewed_bulk_value(item, "shape")
+
+    record_prediction(
+        item,
+        head="shape",
+        head_type="multi_class",
+        prediction=Prediction(
+            value="circle", score=0.9, margin=0.4, top=[("circle", 0.9)], confidence=0.9
+        ),
+        run_name="run_y",
+    )
+
+    assert is_unreviewed_bulk_value(item, "shape"), "候補を付け直したら記録が消えた"
+
+
+def test_a_new_prediction_with_another_value_does_not_defeat_it() -> None:
+    """新しい予測が別の値を出しても「人が直した」とは読まない（#418）。
+
+    比べる相手は `confirmed` が持つ値であって、付け直された `value` ではない。
+    """
+    from label_predictions import Prediction, record_prediction
+
+    item = _bulk("circle")
+    record_prediction(
+        item,
+        head="shape",
+        head_type="multi_class",
+        prediction=Prediction(
+            value="square", score=0.7, margin=0.2, top=[("square", 0.7)], confidence=0.7
+        ),
+        run_name="run_y",
+    )
+
+    assert item["predicted"]["shape"]["value"] == "square"
+    assert item["labels"]["shape"] == "circle"
+    assert is_unreviewed_bulk_value(item, "shape"), "新しい予測につられて判定が狂った"
+
+
+def test_the_person_can_still_take_it_back() -> None:
+    """引き継いでも、人が値を直せば未確認ではなくなる（#418）。"""
+    from label_predictions import Prediction, record_prediction
+
+    item = _bulk("circle")
+    item["labels"]["shape"] = "square"  # 人が直した
+    record_prediction(
+        item,
+        head="shape",
+        head_type="multi_class",
+        prediction=Prediction(
+            value="circle", score=0.9, margin=0.4, top=[("circle", 0.9)], confidence=0.9
+        ),
+        run_name="run_y",
+    )
+
+    assert not is_unreviewed_bulk_value(item, "shape")
+
+
+def test_records_written_before_this_change_are_still_read() -> None:
+    """`confirmed` が値を持たない古い記録は、従来どおり `value` と比べる（#418）。"""
+    assert is_unreviewed_bulk_value(_legacy_bulk("circle"), "shape")
+    assert not is_unreviewed_bulk_value(_legacy_bulk("circle", "square"), "shape")
+
+
+def test_a_prediction_without_a_confirmation_stays_clean() -> None:
+    """一括確定を通っていない item に、記録が生えたりしない（#418）。"""
+    from label_predictions import Prediction, record_prediction
+
+    item: Dict[str, Any] = {"labels": {"shape": "circle"}}
+    record_prediction(
+        item,
+        head="shape",
+        head_type="multi_class",
+        prediction=Prediction(
+            value="circle", score=0.9, margin=0.4, top=[("circle", 0.9)], confidence=0.9
+        ),
+        run_name="run_y",
+    )
+
+    assert "confirmed" not in item["predicted"]["shape"]
+    assert not is_unreviewed_bulk_value(item, "shape")
 
 
 def test_skipped_heads_are_not_counted() -> None:

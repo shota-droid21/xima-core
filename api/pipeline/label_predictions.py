@@ -209,7 +209,8 @@ def record_prediction(
     predicted = item.get(PREDICTED_KEY)
     if not isinstance(predicted, dict):
         predicted = {}
-    predicted[head] = {
+    previous = predicted.get(head)
+    entry = {
         "head_type": head_type,
         "value": prediction.value,
         "score": round(float(prediction.score), 6),
@@ -220,6 +221,12 @@ def record_prediction(
         "run": run_name,
         "at": now or time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
+    # **一括確定の記録は引き継ぐ（#418）。**「この値は人がまだ見ていない」という
+    # 事実は、候補を付け直しても変わらない。落とすと #412 の判定が効かなくなり、
+    # 未確認の値が評価の正解側へ戻る。
+    if isinstance(previous, dict) and isinstance(previous.get("confirmed"), dict):
+        entry["confirmed"] = previous["confirmed"]
+    predicted[head] = entry
     item[PREDICTED_KEY] = predicted
 
 
